@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const http = require('http');
 
@@ -7,22 +9,32 @@ const { registerSocketHandlers } = require('./net/socketHandlers');
 const { createApiRouter } = require('./net/apiRoutes');
 const PuzzleShareStore = require('./game/PuzzleShareStore');
 const StatsStore = require('./game/StatsStore');
-
-const app = express();
-const server = http.createServer(app);
-const io = attachWsServer(server);
+const { connectDb } = require('./db');
 
 const PORT = process.env.PORT || 6969;
 
-app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+async function main() {
+  const db = await connectDb();
 
-const puzzleShareStore = new PuzzleShareStore();
-const statsStore = new StatsStore();
-app.use('/api', createApiRouter({ puzzleShareStore, statsStore }));
+  const app = express();
+  const server = http.createServer(app);
+  const io = attachWsServer(server);
 
-const roomManager = new RoomManager();
-registerSocketHandlers(io, roomManager);
+  app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
-server.listen(PORT, () => {
-  console.log(`Server up and running on port:${PORT}`);
+  const puzzleShareStore = new PuzzleShareStore(db);
+  const statsStore = new StatsStore(db);
+  app.use('/api', createApiRouter({ puzzleShareStore, statsStore }));
+
+  const roomManager = new RoomManager();
+  registerSocketHandlers(io, roomManager);
+
+  server.listen(PORT, () => {
+    console.log(`Server up and running on port:${PORT}`);
+  });
+}
+
+main().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });

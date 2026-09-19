@@ -3,28 +3,31 @@ const { customAlphabet } = require('nanoid');
 // Same alphabet as RoomManager's room codes: excludes ambiguous chars.
 const CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const generateCode = customAlphabet(CODE_ALPHABET, 6);
+const COLLECTION = 'puzzles';
 
-// Holds shared puzzles in memory, keyed by a short code. Only the word list
-// and each word's placement (cells) are stored -- the filler letters in the
-// unused cells aren't part of what makes a puzzle "the same puzzle" (they
-// don't affect which words are findable), so the recipient regenerates
-// those locally instead of the payload carrying a full 100-cell grid.
+// Backed by Mongo so a shared puzzle link survives a server restart/redeploy
+// -- only the word list and each word's placement (cells) are stored, since
+// the filler letters in the unused cells aren't part of what makes a puzzle
+// "the same puzzle" (they don't affect which words are findable); the
+// recipient regenerates those locally instead of the record carrying a full
+// 100-cell grid.
 class PuzzleShareStore {
-  constructor() {
-    this.puzzles = new Map(); // code -> record
+  constructor(db) {
+    this.collection = db.collection(COLLECTION);
   }
 
-  _newCode() {
+  async _newCode() {
     let code;
     do {
       code = generateCode();
-    } while (this.puzzles.has(code));
+    } while (await this.collection.findOne({ _id: code }));
     return code;
   }
 
-  create({ gridSize, words, placements, sharedByTimeSeconds }) {
-    const code = this._newCode();
+  async create({ gridSize, words, placements, sharedByTimeSeconds }) {
+    const code = await this._newCode();
     const record = {
+      _id: code,
       code,
       gridSize,
       words,
@@ -32,12 +35,12 @@ class PuzzleShareStore {
       sharedByTimeSeconds: sharedByTimeSeconds ?? null,
       createdAt: Date.now(),
     };
-    this.puzzles.set(code, record);
+    await this.collection.insertOne(record);
     return record;
   }
 
-  get(code) {
-    return this.puzzles.get(String(code || '').toUpperCase());
+  async get(code) {
+    return this.collection.findOne({ _id: String(code || '').toUpperCase() });
   }
 }
 

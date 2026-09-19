@@ -9,7 +9,9 @@
   "author": "Aravind A",
   "license": "ISC",
   "dependencies": {
+    "dotenv": "^18.0.1",
     "express": "^5.2.1",
+    "mongodb": "^7.6.0",
     "nanoid": "^3.3.19",
     "ws": "^8.21.3"
   }

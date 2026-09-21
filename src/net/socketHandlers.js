@@ -13,9 +13,20 @@ function emitMatchStart(io, room) {
   io.to(room.id).emit('matchStart', matchStartPayload(room));
 }
 
+// Trophies only ever apply to ranked (Quick Match) rooms -- Create/Join Room
+// stays casual with no trophy stakes. Ties get no trophy change either way.
+async function applyRankedResult(room, winner, loserId, trophyStore) {
+  if (room.mode !== 'ranked' || !winner || winner === 'tie' || !loserId) return [];
+  const result = await trophyStore.applyMatchResult(winner, loserId);
+  return [
+    { deviceId: result.winner.deviceId, trophies: result.winner.trophies, delta: result.winner.delta },
+    { deviceId: result.loser.deviceId, trophies: result.loser.trophies, delta: result.loser.delta },
+  ];
+}
+
 function handleCreateRoom(socket, roomManager) {
   const { deviceId, name } = socket.data;
-  const room = roomManager.createRoom({ deviceId, socketId: socket.id, name });
+  const room = roomManager.createRoom({ deviceId, socketId: socket.id, name }, 'unranked');
   socket.join(room.id);
   socket.emit('roomCreated', { code: room.id });
 }
@@ -37,27 +48,20 @@ function handleJoinRoom(socket, roomManager, io, code) {
   emitMatchStart(io, room);
 }
 
-function handleFindMatch(socket, roomManager, io) {
+async function handleFindMatch(socket, roomManager, io, trophyStore) {
   const { deviceId, name } = socket.data;
-  const room = roomManager.findMatch({ deviceId, socketId: socket.id, name });
-  if (!room) return; // queued, waiting for an opponent
-
-  for (const p of room.players) {
-    io.sockets.sockets.get(p.socketId)?.join(room.id);
-  }
-
-  const [a, b] = room.players;
-  io.to(a.socketId).emit('opponentJoined', { opponentName: b.name });
-  io.to(b.socketId).emit('opponentJoined', { opponentName: a.name });
-
-  emitMatchStart(io, room);
+  const { arena } = await trophyStore.getOrCreate(deviceId);
+  roomManager.queueForMatch({ deviceId, socketId: socket.id, name, arena });
+  // Pairing (and matchStart emission) happens asynchronously on the
+  // matchmaker's next tick, via the onRoomReady callback registered in
+  // registerSocketHandlers -- not synchronously here.
 }
 
 function handleCancelFindMatch(socket, roomManager) {
   roomManager.cancelFindMatch(socket.data.deviceId);
 }
 
-function handleSubmitWord(socket, roomManager, io, cells) {
+async function handleSubmitWord(socket, roomManager, io, cells, trophyStore) {
   const { deviceId } = socket.data;
   const room = roomManager.getRoomByDeviceId(deviceId);
   if (!room || room.status !== 'playing') {
@@ -73,13 +77,15 @@ function handleSubmitWord(socket, roomManager, io, cells) {
   io.to(room.id).emit('wordFound', { word: entry.word, cells: entry.cells, deviceId, scores });
 
   if (gameOver) {
-    io.to(room.id).emit('gameOver', { winner, scores });
+    const loserId = winner !== 'tie' ? room.otherPlayer(winner)?.deviceId : null;
+    const trophyChanges = await applyRankedResult(room, winner, loserId, trophyStore);
+    io.to(room.id).emit('gameOver', { winner, scores, trophyChanges });
     room.clearAllTimers();
     roomManager.closeRoom(room.id);
   }
 }
 
-function handleLeaveRoom(socket, roomManager, io) {
+function handleLeaveRoom(socket, roomManager, io, trophyStore) {
   const { deviceId } = socket.data;
   roomManager.cancelFindMatch(deviceId);
 
@@ -91,7 +97,9 @@ function handleLeaveRoom(socket, roomManager, io) {
   if (room.status === 'playing') {
     const opponent = room.otherPlayer(deviceId);
     if (opponent) {
-      io.to(room.id).emit('gameOver', { winner: opponent.deviceId, scores: room.scores() });
+      applyRankedResult(room, opponent.deviceId, deviceId, trophyStore).then((trophyChanges) => {
+        io.to(room.id).emit('gameOver', { winner: opponent.deviceId, scores: room.scores(), trophyChanges });
+      });
     }
   }
   roomManager.closeRoom(room.id);
@@ -119,7 +127,7 @@ function handleRejoinRoom(socket, roomManager, io, code) {
   }
 }
 
-function handleDisconnect(socket, roomManager, io) {
+function handleDisconnect(socket, roomManager, io, trophyStore) {
   const { deviceId } = socket.data || {};
   if (!deviceId) return;
   roomManager.cancelFindMatch(deviceId);
@@ -138,24 +146,45 @@ function handleDisconnect(socket, roomManager, io) {
     if (!stillRoom || stillRoom.status !== 'playing') return;
     const remaining = stillRoom.otherPlayer(expiredDeviceId);
     if (remaining) {
-      io.to(stillRoom.id).emit('gameOver', { winner: remaining.deviceId, scores: stillRoom.scores() });
+      applyRankedResult(stillRoom, remaining.deviceId, expiredDeviceId, trophyStore).then((trophyChanges) => {
+        io.to(stillRoom.id).emit('gameOver', { winner: remaining.deviceId, scores: stillRoom.scores(), trophyChanges });
+      });
     }
     roomManager.closeRoom(stillRoom.id);
   });
 }
 
-function registerSocketHandlers(io, roomManager) {
+// Fired by RoomManager.onRoomReady() whenever the ticking matchmaker pairs
+// two ranked queue entries into a room -- the equivalent of the old
+// synchronous handleFindMatch's second half, now decoupled from the request
+// that triggered queuing since pairing can happen well after either
+// player's findMatch call returns.
+function handleRoomReady(io, room) {
+  for (const p of room.players) {
+    io.sockets.sockets.get(p.socketId)?.join(room.id);
+  }
+
+  const [a, b] = room.players;
+  io.to(a.socketId).emit('opponentJoined', { opponentName: b.name });
+  io.to(b.socketId).emit('opponentJoined', { opponentName: a.name });
+
+  emitMatchStart(io, room);
+}
+
+function registerSocketHandlers(io, roomManager, trophyStore) {
+  roomManager.onRoomReady((room) => handleRoomReady(io, room));
+
   io.on('connection', (socket) => {
     // socket.data.{deviceId,name} is already populated by the wsAdapter
     // (it validates deviceId and disconnects before this event fires).
     socket.on('createRoom', () => handleCreateRoom(socket, roomManager));
     socket.on('joinRoom', ({ code } = {}) => handleJoinRoom(socket, roomManager, io, code));
-    socket.on('findMatch', () => handleFindMatch(socket, roomManager, io));
+    socket.on('findMatch', () => handleFindMatch(socket, roomManager, io, trophyStore));
     socket.on('cancelFindMatch', () => handleCancelFindMatch(socket, roomManager));
-    socket.on('submitWord', ({ cells } = {}) => handleSubmitWord(socket, roomManager, io, cells));
-    socket.on('leaveRoom', () => handleLeaveRoom(socket, roomManager, io));
+    socket.on('submitWord', ({ cells } = {}) => handleSubmitWord(socket, roomManager, io, cells, trophyStore));
+    socket.on('leaveRoom', () => handleLeaveRoom(socket, roomManager, io, trophyStore));
     socket.on('rejoinRoom', ({ code } = {}) => handleRejoinRoom(socket, roomManager, io, code));
-    socket.on('disconnect', () => handleDisconnect(socket, roomManager, io));
+    socket.on('disconnect', () => handleDisconnect(socket, roomManager, io, trophyStore));
   });
 }
 

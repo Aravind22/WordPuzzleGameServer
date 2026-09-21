@@ -3,12 +3,19 @@ const express = require('express');
 // Plain REST endpoints for solo-mode features (puzzle sharing, global solved
 // counter) -- separate concern from the 1v1 WebSocket protocol in
 // wsAdapter.js/socketHandlers.js, mounted under /api on the same Express app.
-function createApiRouter({ puzzleShareStore, statsStore }) {
+function createApiRouter({ puzzleShareStore, statsStore, trophyStore }) {
   const router = express.Router();
   router.use(express.json());
 
   router.get('/stats', async (_req, res) => {
     res.json({ totalSolved: await statsStore.getTotalSolved() });
+  });
+
+  // Fetched by the client on opening the multiplayer menu, so it can show
+  // the player's current arena/trophy count before/without a ranked match.
+  router.get('/players/:deviceId', async (req, res) => {
+    const { trophies, arena } = await trophyStore.getOrCreate(req.params.deviceId);
+    res.json({ trophies, arena });
   });
 
   // Client only calls this the first time a given puzzle id is solved

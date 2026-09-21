@@ -39,8 +39,9 @@ function isStraightLine(cells) {
 }
 
 class Room {
-  constructor(id) {
+  constructor(id, mode = 'unranked') {
     this.id = id;
+    this.mode = mode; // 'ranked' (Quick Match) | 'unranked' (Create/Join Room) -- trophies only apply to 'ranked'
     this.players = []; // { deviceId, socketId, name, foundWords: [], connected }
     this.grid = null;
     this.gridSize = GRID_SIZE;

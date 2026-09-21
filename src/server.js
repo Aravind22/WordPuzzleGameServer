@@ -9,6 +9,7 @@ const { registerSocketHandlers } = require('./net/socketHandlers');
 const { createApiRouter } = require('./net/apiRoutes');
 const PuzzleShareStore = require('./game/PuzzleShareStore');
 const StatsStore = require('./game/StatsStore');
+const TrophyStore = require('./game/TrophyStore');
 const { connectDb } = require('./db');
 
 const PORT = process.env.PORT || 6969;
@@ -24,10 +25,11 @@ async function main() {
 
   const puzzleShareStore = new PuzzleShareStore(db);
   const statsStore = new StatsStore(db);
-  app.use('/api', createApiRouter({ puzzleShareStore, statsStore }));
+  const trophyStore = new TrophyStore(db);
+  app.use('/api', createApiRouter({ puzzleShareStore, statsStore, trophyStore }));
 
   const roomManager = new RoomManager();
-  registerSocketHandlers(io, roomManager);
+  registerSocketHandlers(io, roomManager, trophyStore);
 
   server.listen(PORT, () => {
     console.log(`Server up and running on port:${PORT}`);

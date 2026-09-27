@@ -27,18 +27,24 @@ async function applyRankedResult(room, winner, loserId, trophyStore) {
 function handleCreateRoom(socket, roomManager) {
   const { deviceId, name } = socket.data;
   const room = roomManager.createRoom({ deviceId, socketId: socket.id, name }, 'unranked');
+  console.log(`[createRoom] ${deviceId} (${name}) created room ${room.id}`);
   socket.join(room.id);
   socket.emit('roomCreated', { code: room.id });
 }
 
 function handleJoinRoom(socket, roomManager, io, code) {
   const { deviceId, name } = socket.data;
+  console.log(`[joinRoom] ${deviceId} (${name}) attempting to join ${code}`);
   if (!code) return socket.emit('errorMsg', { code: 'invalid-request' });
 
   const result = roomManager.joinRoom(String(code).toUpperCase(), { deviceId, socketId: socket.id, name });
-  if (result.error) return socket.emit('errorMsg', { code: result.error });
+  if (result.error) {
+    console.warn(`[joinRoom] ${deviceId} failed to join ${code}: ${result.error}`);
+    return socket.emit('errorMsg', { code: result.error });
+  }
 
   const room = result.room;
+  console.log(`[joinRoom] ${deviceId} joined room ${room.id}`);
   socket.join(room.id);
 
   const opponent = room.otherPlayer(deviceId);
@@ -50,14 +56,23 @@ function handleJoinRoom(socket, roomManager, io, code) {
 
 async function handleFindMatch(socket, roomManager, io, trophyStore) {
   const { deviceId, name } = socket.data;
-  const { arena } = await trophyStore.getOrCreate(deviceId);
+  console.log(`[findMatch] ${deviceId} (${name}) requested match`);
+  let arena;
+  try {
+    ({ arena } = await trophyStore.getOrCreate(deviceId));
+  } catch (err) {
+    console.error(`[findMatch] ${deviceId} trophyStore.getOrCreate failed:`, err);
+    return socket.emit('errorMsg', { code: 'find-match-failed' });
+  }
   roomManager.queueForMatch({ deviceId, socketId: socket.id, name, arena });
+  console.log(`[findMatch] ${deviceId} queued, arena=${arena}, queueLength=${roomManager.queue.length}`);
   // Pairing (and matchStart emission) happens asynchronously on the
   // matchmaker's next tick, via the onRoomReady callback registered in
   // registerSocketHandlers -- not synchronously here.
 }
 
 function handleCancelFindMatch(socket, roomManager) {
+  console.log(`[findMatch] ${socket.data.deviceId} cancelled`);
   roomManager.cancelFindMatch(socket.data.deviceId);
 }
 
@@ -65,13 +80,16 @@ async function handleSubmitWord(socket, roomManager, io, cells, trophyStore) {
   const { deviceId } = socket.data;
   const room = roomManager.getRoomByDeviceId(deviceId);
   if (!room || room.status !== 'playing') {
+    console.warn(`[submitWord] ${deviceId} no active room (status=${room?.status})`);
     return socket.emit('wordRejected', { reason: 'no-active-room' });
   }
 
   const entry = room.validateSubmission(cells);
   if (!entry) {
+    console.warn(`[submitWord] ${deviceId} invalid submission:`, cells);
     return socket.emit('wordRejected', { reason: 'invalid' });
   }
+  console.log(`[submitWord] ${deviceId} found "${entry.word}" in room ${room.id}`);
 
   const { scores, gameOver, winner } = room.recordFound(entry, deviceId);
   io.to(room.id).emit('wordFound', { word: entry.word, cells: entry.cells, deviceId, scores });
@@ -87,6 +105,7 @@ async function handleSubmitWord(socket, roomManager, io, cells, trophyStore) {
 
 function handleLeaveRoom(socket, roomManager, io, trophyStore) {
   const { deviceId } = socket.data;
+  console.log(`[leaveRoom] ${deviceId} leaving`);
   roomManager.cancelFindMatch(deviceId);
 
   const room = roomManager.getRoomByDeviceId(deviceId);
@@ -107,8 +126,10 @@ function handleLeaveRoom(socket, roomManager, io, trophyStore) {
 
 function handleRejoinRoom(socket, roomManager, io, code) {
   const { deviceId } = socket.data;
+  console.log(`[rejoinRoom] ${deviceId} attempting to rejoin ${code}`);
   const room = roomManager.getRoom(String(code || '').toUpperCase());
   if (!room || !room.getPlayer(deviceId)) {
+    console.warn(`[rejoinRoom] ${deviceId} failed: room-not-found (code=${code})`);
     return socket.emit('errorMsg', { code: 'room-not-found' });
   }
 
@@ -129,6 +150,7 @@ function handleRejoinRoom(socket, roomManager, io, code) {
 
 function handleDisconnect(socket, roomManager, io, trophyStore) {
   const { deviceId } = socket.data || {};
+  console.log(`[socket] ${socket.id} disconnected, deviceId=${deviceId}`);
   if (!deviceId) return;
   roomManager.cancelFindMatch(deviceId);
 
@@ -160,8 +182,14 @@ function handleDisconnect(socket, roomManager, io, trophyStore) {
 // that triggered queuing since pairing can happen well after either
 // player's findMatch call returns.
 function handleRoomReady(io, room) {
+  console.log(`[matchmaker] room ${room.id} ready:`, room.players.map((p) => p.deviceId));
   for (const p of room.players) {
-    io.sockets.sockets.get(p.socketId)?.join(room.id);
+    const sock = io.sockets.sockets.get(p.socketId);
+    if (!sock) {
+      console.warn(`[matchmaker] room ${room.id}: no live socket for ${p.deviceId} (${p.socketId}), likely disconnected before pairing`);
+      continue;
+    }
+    sock.join(room.id);
   }
 
   const [a, b] = room.players;
@@ -175,6 +203,7 @@ function registerSocketHandlers(io, roomManager, trophyStore) {
   roomManager.onRoomReady((room) => handleRoomReady(io, room));
 
   io.on('connection', (socket) => {
+    console.log(`[socket] connection event for ${socket.id}, deviceId=${socket.data.deviceId}`);
     // socket.data.{deviceId,name} is already populated by the wsAdapter
     // (it validates deviceId and disconnects before this event fires).
     socket.on('createRoom', () => handleCreateRoom(socket, roomManager));

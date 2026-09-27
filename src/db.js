@@ -10,6 +10,7 @@ async function connectDb() {
   if (!uri) throw new Error('MONGO_CONN_STRING is not set');
   const client = new MongoClient(uri);
   await client.connect();
+  console.log('[db] connected to Space');
   db = client.db('wordpuzzle');
   return db;
 }

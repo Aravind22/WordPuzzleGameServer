@@ -67,10 +67,13 @@ class RoomManager {
   queueForMatch({ deviceId, socketId, name, arena }) {
     this.queue = this.queue.filter((q) => q.deviceId !== deviceId);
     this.queue.push({ deviceId, socketId, name, arena, queuedAt: Date.now() });
+    console.log(`[RoomManager] queued ${deviceId} arena=${arena}, queue=[${this.queue.map((q) => `${q.deviceId}/${q.arena}`).join(', ')}]`);
   }
 
   cancelFindMatch(deviceId) {
+    const had = this.queue.some((q) => q.deviceId === deviceId);
     this.queue = this.queue.filter((q) => q.deviceId !== deviceId);
+    if (had) console.log(`[RoomManager] dequeued ${deviceId}`);
   }
 
   // Same-arena pass first (skill-relevant pairing when possible), then an
@@ -81,6 +84,7 @@ class RoomManager {
   // period, pair it with a bot instead of a human opponent.
   matchmakerTick() {
     if (this.queue.length < 2) return;
+    console.log(`[matchmakerTick] running, queue=[${this.queue.map((q) => `${q.deviceId}/${q.arena}`).join(', ')}]`);
 
     const matchedDeviceIds = new Set();
     const byArena = new Map();
@@ -126,6 +130,8 @@ class RoomManager {
     room.addPlayer(b);
     this.deviceToRoom.set(b.deviceId, room.id);
     room.start();
+    console.log(`[matchmakerTick] paired ${a.deviceId} vs ${b.deviceId} -> room ${room.id}`);
+    if (!this._onRoomReady) console.warn('[matchmakerTick] no onRoomReady callback registered -- sockets will never be joined to the room');
     this._onRoomReady?.(room);
   }
 

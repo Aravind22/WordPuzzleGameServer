@@ -15,11 +15,19 @@
 const { WebSocketServer } = require('ws');
 const { EventEmitter } = require('events');
 const { randomUUID } = require('crypto');
+const debug = require('debug');
+
+// 'ws:conn' traces connect/disconnect lifecycle; 'ws:msg' traces every frame
+// in/out and is the noisiest namespace, kept separate so it can be left off
+// (e.g. `DEBUG=ws:conn,mm,socket`) while still tracing everything else.
+const logConn = debug('ws:conn');
+const logMsg = debug('ws:msg');
 
 class SocketFacade extends EventEmitter {
   constructor(ws, io) {
     super();
     this.id = randomUUID();
+    this.shortId = this.id.slice(0, 8);
     this.ws = ws;
     this.data = {};
     this._io = io;
@@ -30,14 +38,14 @@ class SocketFacade extends EventEmitter {
       try {
         msg = JSON.parse(raw.toString());
       } catch (err) {
-        console.error(`[ws] ${this.id} bad JSON:`, raw.toString(), err.message);
+        console.error(`[ws:msg] ${this.shortId} bad JSON: ${raw.toString()} (${err.message})`);
         return;
       }
       if (!msg || typeof msg.type !== 'string') {
-        console.error(`[ws] ${this.id} malformed message (no .type):`, msg);
+        console.error(`[ws:msg] ${this.shortId} malformed message (no .type):`, msg);
         return;
       }
-      console.log(`[ws] ${this.id} <- ${msg.type}`, msg.payload ?? '');
+      logMsg('%s <- %s %o', this.shortId, msg.type, msg.payload ?? '');
       // Dispatches to this socket's own `.on(type, cb)` listeners. Uses the
       // base EventEmitter behavior directly since `.emit` is overridden
       // below to mean "send to the client" instead.
@@ -45,11 +53,11 @@ class SocketFacade extends EventEmitter {
     });
 
     ws.on('error', (err) => {
-      console.error(`[ws] ${this.id} socket error:`, err.message);
+      console.error(`[ws:conn] ${this.shortId} socket error: ${err.message}`);
     });
 
     ws.on('close', (code, reason) => {
-      console.log(`[ws] ${this.id} closed`, code, reason?.toString());
+      logConn('%s closed code=%s %s', this.shortId, code, reason?.toString() ?? '');
       for (const room of this._rooms) this._io._removeFromRoom(room, this);
       this._io._removeSocket(this);
       super.emit('disconnect');
@@ -60,10 +68,10 @@ class SocketFacade extends EventEmitter {
   // (mirrors Socket.IO's socket.emit semantics).
   emit(type, payload) {
     if (this.ws.readyState === this.ws.OPEN) {
-      console.log(`[ws] ${this.id} -> ${type}`, payload ?? '');
+      logMsg('%s -> %s %o', this.shortId, type, payload ?? '');
       this.ws.send(JSON.stringify({ type, payload }));
     } else {
-      console.warn(`[ws] ${this.id} dropped ${type}, readyState=${this.ws.readyState}`);
+      console.warn(`[ws:msg] ${this.shortId} dropped ${type}, readyState=${this.ws.readyState}`);
     }
     return true;
   }
@@ -135,10 +143,10 @@ function attachWsServer(server) {
     io._socketsById.set(socket.id, socket);
     socket.join(socket.id); // mirrors Socket.IO's implicit self-id room, used for direct-to-socket sends
 
-    console.log(`[ws] ${socket.id} connected, url=${req.url}, deviceId=${deviceId}, name=${name}`);
+    logConn('%s connected deviceId=%s name=%s', socket.shortId, deviceId, name);
 
     if (!deviceId) {
-      console.warn(`[ws] ${socket.id} rejected: missing deviceId`);
+      console.warn(`[ws:conn] ${socket.shortId} rejected: missing deviceId`);
       socket.emit('errorMsg', { code: 'missing-device-id' });
       socket.disconnect();
       return;
@@ -151,7 +159,7 @@ function attachWsServer(server) {
   });
 
   wss.on('error', (err) => {
-    console.error('[ws] server error:', err.message);
+    console.error('[ws:conn] server error:', err.message);
   });
 
   return io;

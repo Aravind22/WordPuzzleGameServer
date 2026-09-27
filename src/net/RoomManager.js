@@ -1,5 +1,8 @@
 const { customAlphabet } = require('nanoid');
 const Room = require('../game/Room');
+const debug = require('debug');
+
+const logMm = debug('mm');
 
 // Excludes ambiguous chars (0/O, 1/I) so codes are easy to read/type aloud.
 const CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
@@ -67,13 +70,13 @@ class RoomManager {
   queueForMatch({ deviceId, socketId, name, arena }) {
     this.queue = this.queue.filter((q) => q.deviceId !== deviceId);
     this.queue.push({ deviceId, socketId, name, arena, queuedAt: Date.now() });
-    console.log(`[RoomManager] queued ${deviceId} arena=${arena}, queue=[${this.queue.map((q) => `${q.deviceId}/${q.arena}`).join(', ')}]`);
+    logMm('queue += %s (arena=%s) -> [%s]', deviceId, arena, this.queue.map((q) => `${q.deviceId}/${q.arena}`).join(', '));
   }
 
   cancelFindMatch(deviceId) {
     const had = this.queue.some((q) => q.deviceId === deviceId);
     this.queue = this.queue.filter((q) => q.deviceId !== deviceId);
-    if (had) console.log(`[RoomManager] dequeued ${deviceId}`);
+    if (had) logMm('queue -= %s', deviceId);
   }
 
   // Same-arena pass first (skill-relevant pairing when possible), then an
@@ -84,7 +87,7 @@ class RoomManager {
   // period, pair it with a bot instead of a human opponent.
   matchmakerTick() {
     if (this.queue.length < 2) return;
-    console.log(`[matchmakerTick] running, queue=[${this.queue.map((q) => `${q.deviceId}/${q.arena}`).join(', ')}]`);
+    logMm('tick: [%s]', this.queue.map((q) => `${q.deviceId}/${q.arena}`).join(', '));
 
     const matchedDeviceIds = new Set();
     const byArena = new Map();
@@ -130,8 +133,8 @@ class RoomManager {
     room.addPlayer(b);
     this.deviceToRoom.set(b.deviceId, room.id);
     room.start();
-    console.log(`[matchmakerTick] paired ${a.deviceId} vs ${b.deviceId} -> room ${room.id}`);
-    if (!this._onRoomReady) console.warn('[matchmakerTick] no onRoomReady callback registered -- sockets will never be joined to the room');
+    logMm('paired %s vs %s -> room %s', a.deviceId, b.deviceId, room.id);
+    if (!this._onRoomReady) console.warn('[mm] no onRoomReady callback registered -- sockets will never be joined to the room');
     this._onRoomReady?.(room);
   }
 

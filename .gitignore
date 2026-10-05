@@ -1,3 +1,9 @@
 node_modules/
 data/
 .env
+
+# Firebase service account keys must never be committed (keep them outside
+# the repo, see FIREBASE_SERVICE_ACCOUNT_FILE in .env)
+*firebase-admin*.json
+*-adminsdk-*.json
+service-account*.json

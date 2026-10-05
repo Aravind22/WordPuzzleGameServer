@@ -59,6 +59,27 @@ class PlayerStore {
     return PlayerStore.toPlayer(doc);
   }
 
+  // "Restore saved account" (client conflict flow): the player had a guest
+  // account on this device, then signed into Play Games/Google which
+  // already belongs to an older account. Folds the guest into the saved
+  // account and deletes the guest's player record. The saved account's
+  // profile and trophies win; purchased currency moves over once the
+  // wallet exists (Phase 2), free starter grants never do.
+  // Returns the saved account's player.
+  async mergeGuestInto(targetId, guestId) {
+    const guest = await this.collection.findOne({ _id: guestId });
+    await this.getOrCreate(targetId);
+    if (guest) {
+      await this.collection.updateOne(
+        { _id: targetId },
+        { $push: { mergedFrom: { playerId: guestId, trophies: guest.trophies || 0, at: Date.now() } } }
+      );
+      await this.collection.deleteOne({ _id: guestId });
+    }
+    const target = await this.collection.findOne({ _id: targetId });
+    return { player: PlayerStore.toPlayer(target), merged: !!guest };
+  }
+
   // Applies a ranked match result: winner gains WIN_GAIN, loser loses
   // LOSS_DEDUCTION (clamped at 0, never negative). Returns both players'
   // updated { playerId, trophies, arena, delta }.

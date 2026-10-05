@@ -1,5 +1,5 @@
 const express = require('express');
-const { requireAuth } = require('../auth/firebaseAuth');
+const { requireAuth, verifyIdToken } = require('../auth/firebaseAuth');
 
 // Plain REST endpoints for solo-mode features and the player profile --
 // separate concern from the 1v1 WebSocket protocol in
@@ -21,6 +21,21 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore }) {
     const player = await playerStore.setName(req.uid, req.body?.name);
     if (!player) return res.status(400).json({ error: 'invalid-name' });
     res.json(player);
+  });
+
+  // Conflict "Restore": the caller authenticates as the SAVED account and
+  // proves ownership of the guest with its ID token in the body, so neither
+  // account can be merged into the other without holding both.
+  router.post('/accounts/merge', async (req, res) => {
+    let guestId;
+    try {
+      guestId = await verifyIdToken(req.body?.guestToken);
+    } catch {
+      return res.status(400).json({ error: 'invalid-guest-token' });
+    }
+    if (guestId === req.uid) return res.status(400).json({ error: 'same-account' });
+    const { player, merged } = await playerStore.mergeGuestInto(req.uid, guestId);
+    res.json({ ...player, merged, isNew: false, serverNow: Date.now() });
   });
 
   router.get('/stats', async (_req, res) => {

@@ -1,110 +1,85 @@
-// Manual verification script: simulates two players playing a full match
-// through create/join/submitWord against a locally running server.
-// Run `node src/server.js` first, then `node scratch/test.js`.
+// Full unranked match through create/join/submitWord: A finds words, B
+// none, so A must win by majority. Also checks the server-owned names and
+// playerId fields in the protocol. Run against a LOCAL server on a
+// throwaway database:
+//   MONGO_DB_NAME=wordpuzzle_test node src/server.js
+//   node scratch/test.js
 const wsClient = require('./wsClient');
+const { withTestUsers } = require('./testUsers');
+const { findCells } = require('./gridUtil');
 
 const URL = 'ws://localhost:6969';
+const API = 'http://localhost:6969/api';
 
-function connect(deviceId, name) {
-  return wsClient.connect(URL, deviceId, name);
+async function rename(user, name) {
+  await fetch(`${API}/me`, {
+    method: 'PATCH',
+    headers: { Authorization: `Bearer ${user.idToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
 }
 
-const playerA = connect('device-A', 'Alice');
-const playerB = connect('device-B', 'Bob');
+function playMatch(userA, userB) {
+  return new Promise((resolve, reject) => {
+    const a = wsClient.connect(URL, userA);
+    const b = wsClient.connect(URL, userB);
+    const timeout = setTimeout(() => finish(new Error('timed out waiting for match to finish')), 15000);
+    const checks = [];
+    let foundCount = 0;
 
-let grid = null;
-let gridSize = 0;
-let words = [];
-const foundWords = new Set();
-
-function log(who, ...args) {
-  console.log(`[${who}]`, ...args);
-}
-
-function cellsForWord(word) {
-  // Scans the known grid for the word horizontally or vertically since the
-  // test client doesn't have access to server-side placedWords cell data.
-  for (let row = 0; row < gridSize; row++) {
-    for (let col = 0; col <= gridSize - word.length; col++) {
-      let match = true;
-      for (let i = 0; i < word.length; i++) {
-        if (grid[row * gridSize + (col + i)] !== word[i]) { match = false; break; }
-      }
-      if (match) {
-        return Array.from({ length: word.length }, (_, i) => ({ row, col: col + i }));
-      }
+    function finish(err) {
+      clearTimeout(timeout);
+      a.close();
+      b.close();
+      err ? reject(err) : resolve(checks);
     }
+
+    a.on('connect', () => a.emit('createRoom'));
+    a.on('roomCreated', ({ code }) => b.emit('joinRoom', { code }));
+    b.on('opponentJoined', ({ opponentName }) => checks.push(['B sees A\'s server-side name', opponentName === 'Alice']));
+    a.on('opponentJoined', ({ opponentName }) => checks.push(['A sees B\'s server-side name', opponentName === 'Bob']));
+    for (const c of [a, b]) c.on('errorMsg', (e) => finish(new Error(`errorMsg ${JSON.stringify(e)}`)));
+
+    a.on('matchStart', ({ grid, gridSize, words, players }) => {
+      checks.push(['matchStart lists both playerIds', players.some((p) => p.playerId === userA.uid) && players.some((p) => p.playerId === userB.uid)]);
+      checks.push(['matchStart has no deviceId field', players.every((p) => !('deviceId' in p))]);
+      // A submits every word (B nothing) -> A must reach majority first.
+      for (const word of words) {
+        const cells = findCells(grid, gridSize, word);
+        if (cells) a.emit('submitWord', { cells });
+      }
+    });
+
+    a.on('wordFound', ({ playerId }) => {
+      foundCount++;
+      if (foundCount === 1) checks.push(['wordFound carries finder playerId', playerId === userA.uid]);
+    });
+
+    a.on('gameOver', (payload) => {
+      console.log('gameOver:', JSON.stringify(payload));
+      checks.push(['A declared winner (by uid)', payload.winner === userA.uid]);
+      checks.push(['unranked match has no trophy changes', Array.isArray(payload.trophyChanges) && payload.trophyChanges.length === 0]);
+      finish();
+    });
+  });
+}
+
+(async () => {
+  try {
+    const checks = await withTestUsers(2, async ([userA, userB]) => {
+      await rename(userA, 'Alice');
+      await rename(userB, 'Bob');
+      return playMatch(userA, userB);
+    });
+    let failed = 0;
+    for (const [label, ok] of checks) {
+      console.log(`${ok ? 'PASS' : 'FAIL'}  ${label}`);
+      if (!ok) failed++;
+    }
+    console.log(failed === 0 ? 'ALL MATCH TESTS PASSED' : `${failed} MATCH TEST(S) FAILED`);
+    process.exit(failed === 0 ? 0 : 1);
+  } catch (err) {
+    console.error('TEST FAILED:', err.message);
+    process.exit(1);
   }
-  for (let col = 0; col < gridSize; col++) {
-    for (let row = 0; row <= gridSize - word.length; row++) {
-      let match = true;
-      for (let i = 0; i < word.length; i++) {
-        if (grid[(row + i) * gridSize + col] !== word[i]) { match = false; break; }
-      }
-      if (match) {
-        return Array.from({ length: word.length }, (_, i) => ({ row: row + i, col }));
-      }
-    }
-  }
-  return null;
-}
-
-playerA.on('connect', () => {
-  log('A', 'connected', playerA.id);
-  playerA.emit('createRoom');
-});
-
-playerA.on('roomCreated', ({ code }) => {
-  log('A', 'room created', code);
-  playerB.emit('joinRoom', { code });
-});
-
-for (const [sock, who] of [[playerA, 'A'], [playerB, 'B']]) {
-  sock.on('opponentJoined', (payload) => log(who, 'opponentJoined', payload));
-  sock.on('errorMsg', (payload) => log(who, 'errorMsg', payload));
-  sock.on('opponentDisconnected', (payload) => log(who, 'opponentDisconnected', payload));
-  sock.on('opponentReconnected', () => log(who, 'opponentReconnected'));
-
-  sock.on('matchStart', (payload) => {
-    log(who, 'matchStart', { gridSize: payload.gridSize, words: payload.words });
-    if (who === 'A') {
-      grid = payload.grid;
-      gridSize = payload.gridSize;
-      words = payload.words;
-
-      // Player A submits every word it can find; player B submits none, so
-      // A should win by majority once it clears the threshold.
-      let i = 0;
-      const submitNext = () => {
-        if (i >= words.length) return;
-        const word = words[i++];
-        if (foundWords.has(word)) return submitNext();
-        const cells = cellsForWord(word);
-        if (cells) playerA.emit('submitWord', { cells });
-        setTimeout(submitNext, 50);
-      };
-      submitNext();
-    }
-  });
-
-  sock.on('wordFound', (payload) => {
-    foundWords.add(payload.word);
-    log(who, 'wordFound', payload.word, 'scores:', payload.scores);
-  });
-
-  sock.on('wordRejected', (payload) => log(who, 'wordRejected', payload));
-
-  sock.on('gameOver', (payload) => {
-    log(who, 'gameOver', payload);
-    if (who === 'A') {
-      playerA.close();
-      playerB.close();
-      process.exit(0);
-    }
-  });
-}
-
-setTimeout(() => {
-  console.error('Timed out waiting for match to finish');
-  process.exit(1);
-}, 15000);
+})();

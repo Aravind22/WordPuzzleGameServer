@@ -9,27 +9,30 @@ const { registerSocketHandlers } = require('./net/socketHandlers');
 const { createApiRouter } = require('./net/apiRoutes');
 const PuzzleShareStore = require('./game/PuzzleShareStore');
 const StatsStore = require('./game/StatsStore');
-const TrophyStore = require('./game/TrophyStore');
+const PlayerStore = require('./game/PlayerStore');
+const { initFirebase } = require('./auth/firebaseAuth');
 const { connectDb } = require('./db');
 
 const PORT = process.env.PORT || 6969;
 
 async function main() {
+  initFirebase();
   const db = await connectDb();
-
-  const app = express();
-  const server = http.createServer(app);
-  const io = attachWsServer(server);
-
-  app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
   const puzzleShareStore = new PuzzleShareStore(db);
   const statsStore = new StatsStore(db);
-  const trophyStore = new TrophyStore(db);
-  app.use('/api', createApiRouter({ puzzleShareStore, statsStore, trophyStore }));
+  const playerStore = new PlayerStore(db);
+
+  const app = express();
+  const server = http.createServer(app);
+  const io = attachWsServer(server, { playerStore });
+
+  app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+
+  app.use('/api', createApiRouter({ puzzleShareStore, statsStore, playerStore }));
 
   const roomManager = new RoomManager();
-  registerSocketHandlers(io, roomManager, trophyStore);
+  registerSocketHandlers(io, roomManager, playerStore);
 
   server.listen(PORT, () => {
     console.log(`Server up and running on port:${PORT}`);

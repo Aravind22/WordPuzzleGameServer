@@ -12,6 +12,7 @@
     "debug": "^4.4.3",
     "dotenv": "^18.0.1",
     "express": "^5.2.1",
+    "firebase-admin": "^14.5.0",
     "mongodb": "^7.6.0",
     "nanoid": "^3.3.19",
     "ws": "^8.21.3"

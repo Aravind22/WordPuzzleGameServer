@@ -16,6 +16,7 @@ const { WebSocketServer } = require('ws');
 const { EventEmitter } = require('events');
 const { randomUUID } = require('crypto');
 const debug = require('debug');
+const { verifyAuthorizationHeader } = require('../auth/firebaseAuth');
 
 // 'ws:conn' traces connect/disconnect lifecycle; 'ws:msg' traces every frame
 // in/out and is the noisiest namespace, kept separate so it can be left off
@@ -127,32 +128,39 @@ class IoFacade extends EventEmitter {
 }
 
 // Attaches a WebSocketServer to the given http server and returns an
-// `io`-shaped facade. deviceId/name come from the connection URL's query
-// string (?deviceId=...&name=...) since there's no Socket.IO handshake.auth
-// equivalent over plain ws.
-function attachWsServer(server) {
+// `io`-shaped facade. The client authenticates in the upgrade request's
+// Authorization header (Firebase ID token). verifyClient checks the token
+// AND loads the player before the handshake completes, so socket.data is
+// fully populated before the first message can arrive -- an async lookup
+// after 'connection' would race messages sent straight after open.
+function attachWsServer(server, { playerStore }) {
   const io = new IoFacade();
-  const wss = new WebSocketServer({ server });
+  const wss = new WebSocketServer({
+    server,
+    verifyClient: (info, done) => {
+      verifyAuthorizationHeader(info.req.headers.authorization)
+        .then((uid) => playerStore.getOrCreate(uid))
+        .then(({ player }) => {
+          info.req.player = player;
+          done(true);
+        })
+        .catch((err) => {
+          logConn('handshake rejected: %s', err.message);
+          done(false, 401, 'Unauthorized');
+        });
+    },
+  });
 
   wss.on('connection', (ws, req) => {
-    const url = new URL(req.url, 'http://localhost');
-    const deviceId = url.searchParams.get('deviceId');
-    const name = url.searchParams.get('name') || 'Player';
+    const { playerId, name } = req.player;
 
     const socket = new SocketFacade(ws, io);
     io._socketsById.set(socket.id, socket);
     socket.join(socket.id); // mirrors Socket.IO's implicit self-id room, used for direct-to-socket sends
 
-    logConn('%s connected deviceId=%s name=%s', socket.shortId, deviceId, name);
+    logConn('%s connected playerId=%s name=%s', socket.shortId, playerId, name);
 
-    if (!deviceId) {
-      console.warn(`[ws:conn] ${socket.shortId} rejected: missing deviceId`);
-      socket.emit('errorMsg', { code: 'missing-device-id' });
-      socket.disconnect();
-      return;
-    }
-
-    socket.data.deviceId = deviceId;
+    socket.data.playerId = playerId;
     socket.data.name = name;
 
     io.emit('connection', socket);

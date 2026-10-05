@@ -1,26 +1,35 @@
 const express = require('express');
+const { requireAuth } = require('../auth/firebaseAuth');
 
-// Plain REST endpoints for solo-mode features (puzzle sharing, global solved
-// counter) -- separate concern from the 1v1 WebSocket protocol in
+// Plain REST endpoints for solo-mode features and the player profile --
+// separate concern from the 1v1 WebSocket protocol in
 // wsAdapter.js/socketHandlers.js, mounted under /api on the same Express app.
-function createApiRouter({ puzzleShareStore, statsStore, trophyStore }) {
+// Every route requires a Firebase ID token (Authorization: Bearer ...).
+function createApiRouter({ puzzleShareStore, statsStore, playerStore }) {
   const router = express.Router();
   router.use(express.json());
+  router.use(requireAuth);
+
+  // Called by the client on every launch once signed in: creates the player
+  // on first sight and returns everything the client shows about them.
+  router.get('/me', async (req, res) => {
+    const { player, isNew } = await playerStore.getOrCreate(req.uid);
+    res.json({ ...player, isNew, serverNow: Date.now() });
+  });
+
+  router.patch('/me', async (req, res) => {
+    const player = await playerStore.setName(req.uid, req.body?.name);
+    if (!player) return res.status(400).json({ error: 'invalid-name' });
+    res.json(player);
+  });
 
   router.get('/stats', async (_req, res) => {
     res.json({ totalSolved: await statsStore.getTotalSolved() });
   });
 
-  // Fetched by the client on opening the multiplayer menu, so it can show
-  // the player's current arena/trophy count before/without a ranked match.
-  router.get('/players/:deviceId', async (req, res) => {
-    const { trophies, arena } = await trophyStore.getOrCreate(req.params.deviceId);
-    res.json({ trophies, arena });
-  });
-
   // Client only calls this the first time a given puzzle id is solved
   // locally (checked against its own PuzzleHistoryStore) -- no server-side
-  // dedup, trusting the client the same way RoomManager trusts deviceId.
+  // dedup yet.
   router.post('/stats/solved', async (_req, res) => {
     const total = await statsStore.incrementSolved();
     res.json({ totalSolved: total });

@@ -42,17 +42,17 @@ class Room {
   constructor(id, mode = 'unranked') {
     this.id = id;
     this.mode = mode; // 'ranked' (Quick Match) | 'unranked' (Create/Join Room) -- trophies only apply to 'ranked'
-    this.players = []; // { deviceId, socketId, name, foundWords: [], connected }
+    this.players = []; // { playerId, socketId, name, foundWords: [], connected }
     this.grid = null;
     this.gridSize = GRID_SIZE;
     this.placedWords = []; // [{ word, cells }]
-    this.foundBy = new Map(); // word -> deviceId
+    this.foundBy = new Map(); // word -> playerId
     this.foundOrder = [];
     this.status = 'waiting'; // waiting -> playing -> finished
-    this.winner = null; // deviceId | 'tie' | null
+    this.winner = null; // playerId | 'tie' | null
     this.createdAt = Date.now();
     this.lastActivityAt = Date.now();
-    this.disconnectTimers = new Map(); // deviceId -> Timeout
+    this.disconnectTimers = new Map(); // playerId -> Timeout
   }
 
   touch() {
@@ -77,19 +77,19 @@ class Room {
     return this.status !== 'waiting';
   }
 
-  addPlayer({ deviceId, socketId, name }) {
-    const player = { deviceId, socketId, name, foundWords: [], connected: true };
+  addPlayer({ playerId, socketId, name }) {
+    const player = { playerId, socketId, name, foundWords: [], connected: true };
     this.players.push(player);
     this.touch();
     return player;
   }
 
-  getPlayer(deviceId) {
-    return this.players.find((p) => p.deviceId === deviceId);
+  getPlayer(playerId) {
+    return this.players.find((p) => p.playerId === playerId);
   }
 
-  otherPlayer(deviceId) {
-    return this.players.find((p) => p.deviceId !== deviceId);
+  otherPlayer(playerId) {
+    return this.players.find((p) => p.playerId !== playerId);
   }
 
   start() {
@@ -102,11 +102,11 @@ class Room {
     this.touch();
   }
 
-  // Array shape (not a deviceId-keyed object) so the Unity client can
+  // Array shape (not a playerId-keyed object) so the Unity client can
   // deserialize it with JsonUtility, which requires fixed field names and
   // can't handle dynamic dictionary keys.
   scores() {
-    return this.players.map((p) => ({ deviceId: p.deviceId, count: p.foundWords.length }));
+    return this.players.map((p) => ({ playerId: p.playerId, count: p.foundWords.length }));
   }
 
   totalWordCount() {
@@ -129,12 +129,12 @@ class Room {
     return null;
   }
 
-  // Records a found word for deviceId. Caller must have already validated
+  // Records a found word for playerId. Caller must have already validated
   // via validateSubmission. Returns { scores, gameOver, winner }.
-  recordFound(entry, deviceId) {
-    this.foundBy.set(entry.word, deviceId);
-    this.foundOrder.push({ word: entry.word, deviceId });
-    const player = this.getPlayer(deviceId);
+  recordFound(entry, playerId) {
+    this.foundBy.set(entry.word, playerId);
+    this.foundOrder.push({ word: entry.word, playerId });
+    const player = this.getPlayer(playerId);
     player.foundWords.push(entry.word);
     this.touch();
 
@@ -149,7 +149,7 @@ class Room {
     for (const p of this.players) {
       if (p.foundWords.length >= threshold) {
         this.status = 'finished';
-        this.winner = p.deviceId;
+        this.winner = p.playerId;
         return { scores, gameOver: true, winner: this.winner };
       }
     }
@@ -164,40 +164,40 @@ class Room {
     return { scores, gameOver: false, winner: null };
   }
 
-  markDisconnected(deviceId) {
-    const player = this.getPlayer(deviceId);
+  markDisconnected(playerId) {
+    const player = this.getPlayer(playerId);
     if (player) player.connected = false;
     this.touch();
   }
 
-  markReconnected(deviceId, socketId) {
-    const player = this.getPlayer(deviceId);
+  markReconnected(playerId, socketId) {
+    const player = this.getPlayer(playerId);
     if (player) {
       player.connected = true;
       player.socketId = socketId;
     }
     this.touch();
-    this.clearDisconnectTimer(deviceId);
+    this.clearDisconnectTimer(playerId);
   }
 
-  clearDisconnectTimer(deviceId) {
-    const timer = this.disconnectTimers.get(deviceId);
+  clearDisconnectTimer(playerId) {
+    const timer = this.disconnectTimers.get(playerId);
     if (timer) {
       clearTimeout(timer);
-      this.disconnectTimers.delete(deviceId);
+      this.disconnectTimers.delete(playerId);
     }
   }
 
   // Starts the grace-period timer for a disconnected player. onExpire is
   // called if they don't reconnect in time (caller declares the other
   // player the winner and closes the room).
-  startDisconnectTimer(deviceId, onExpire) {
-    this.clearDisconnectTimer(deviceId);
+  startDisconnectTimer(playerId, onExpire) {
+    this.clearDisconnectTimer(playerId);
     const timer = setTimeout(() => {
-      this.disconnectTimers.delete(deviceId);
-      onExpire(deviceId);
+      this.disconnectTimers.delete(playerId);
+      onExpire(playerId);
     }, DISCONNECT_GRACE_MS);
-    this.disconnectTimers.set(deviceId, timer);
+    this.disconnectTimers.set(playerId, timer);
   }
 
   clearAllTimers() {

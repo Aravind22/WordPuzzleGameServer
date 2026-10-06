@@ -80,6 +80,14 @@ class PlayerStore {
     return { player: PlayerStore.toPlayer(target), merged: !!guest };
   }
 
+  // Account deletion (in-app or the web request page): removes everything
+  // the server stores about the player. Shared puzzles carry no owner, so
+  // there is nothing else to remove. Idempotent.
+  async deletePlayer(playerId) {
+    const { deletedCount } = await this.collection.deleteOne({ _id: playerId });
+    return deletedCount > 0;
+  }
+
   // Applies a ranked match result: winner gains WIN_GAIN, loser loses
   // LOSS_DEDUCTION (clamped at 0, never negative). Returns both players'
   // updated { playerId, trophies, arena, delta }.

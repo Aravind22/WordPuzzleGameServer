@@ -11,6 +11,7 @@ const PuzzleShareStore = require('./game/PuzzleShareStore');
 const StatsStore = require('./game/StatsStore');
 const PlayerStore = require('./game/PlayerStore');
 const { initFirebase } = require('./auth/firebaseAuth');
+const { renderDeleteAccountPage } = require('./web/deleteAccountPage');
 const { connectDb } = require('./db');
 
 const PORT = process.env.PORT || 6969;
@@ -28,6 +29,18 @@ async function main() {
   const io = attachWsServer(server, { playerStore });
 
   app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+
+  // Public account-deletion request page (Play Data safety "delete account"
+  // URL). FIREBASE_API_KEY is the app's public web API key; SUPPORT_EMAIL is
+  // shown for players who can't sign in with Google.
+  const deleteAccountHtml = renderDeleteAccountPage({
+    apiKey: process.env.FIREBASE_API_KEY,
+    projectId: process.env.FIREBASE_PROJECT_ID,
+    supportEmail: process.env.SUPPORT_EMAIL,
+  });
+  app.get('/delete-account', (_req, res) => {
+    res.set('Cache-Control', 'no-store').type('html').send(deleteAccountHtml);
+  });
 
   app.use('/api', createApiRouter({ puzzleShareStore, statsStore, playerStore }));
 

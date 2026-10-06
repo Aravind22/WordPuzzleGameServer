@@ -32,6 +32,16 @@ function hasAdminCredentials() {
   return !!process.env.FIREBASE_SERVICE_ACCOUNT_FILE;
 }
 
+// Deletes the Firebase Auth user (all linked sign-ins go with it). Already
+// gone counts as success, so retries are safe. Needs admin credentials.
+async function deleteFirebaseUser(uid) {
+  try {
+    await getAuth().deleteUser(uid);
+  } catch (err) {
+    if (err.code !== 'auth/user-not-found') throw err;
+  }
+}
+
 function bearerToken(authorizationHeader) {
   if (typeof authorizationHeader !== 'string') return null;
   const match = authorizationHeader.match(/^Bearer\s+(.+)$/i);
@@ -59,4 +69,4 @@ function requireAuth(req, res, next) {
     .catch(() => res.status(401).json({ error: 'unauthorized' }));
 }
 
-module.exports = { initFirebase, hasAdminCredentials, verifyIdToken, verifyAuthorizationHeader, requireAuth };
+module.exports = { initFirebase, hasAdminCredentials, deleteFirebaseUser, verifyIdToken, verifyAuthorizationHeader, requireAuth };

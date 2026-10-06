@@ -1,5 +1,5 @@
 const express = require('express');
-const { requireAuth, verifyIdToken } = require('../auth/firebaseAuth');
+const { requireAuth, verifyIdToken, hasAdminCredentials, deleteFirebaseUser } = require('../auth/firebaseAuth');
 
 // Plain REST endpoints for solo-mode features and the player profile --
 // separate concern from the 1v1 WebSocket protocol in
@@ -21,6 +21,23 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore }) {
     const player = await playerStore.setName(req.uid, req.body?.name);
     if (!player) return res.status(400).json({ error: 'invalid-name' });
     res.json(player);
+  });
+
+  // Account deletion (Play policy: the in-app button and the web request
+  // page both call this). Server data first, then the Firebase user; a
+  // failure on the second step returns 500 so the caller can retry (both
+  // steps are idempotent).
+  router.delete('/me', async (req, res) => {
+    if (!hasAdminCredentials()) return res.status(503).json({ error: 'deletion-unavailable' });
+    const hadPlayer = await playerStore.deletePlayer(req.uid);
+    try {
+      await deleteFirebaseUser(req.uid);
+    } catch (err) {
+      console.error(`[account] firebase delete failed for ${req.uid}:`, err.message);
+      return res.status(500).json({ error: 'delete-failed' });
+    }
+    console.log(`[account] deleted ${req.uid} (player record: ${hadPlayer})`);
+    res.json({ deleted: true });
   });
 
   // Conflict "Restore": the caller authenticates as the SAVED account and

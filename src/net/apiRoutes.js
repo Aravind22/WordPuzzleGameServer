@@ -1,23 +1,34 @@
 const express = require('express');
 const { requireAuth, verifyIdToken, hasAdminCredentials, deleteFirebaseUser } = require('../auth/firebaseAuth');
 const { clientConfig } = require('../game/economy');
+const { utcDay, previousDay } = require('../game/utcDay');
+const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/; // a UTC day, 'YYYY-MM-DD'
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
-const SPEND_ITEMS = ['continue', 'replay'];
+const SPEND_ITEMS = ['continue', 'replay', 'hint', 'hint-pack'];
+const NEEDS_PUZZLE = ['continue', 'replay', 'hint'];
+
+// Wallet responses: balances plus the gem price paid (402s carry which
+// balance was short).
+function walletResponse(result) {
+  const { gems, hints, cost, error, short } = result;
+  return { gems, hints, price: cost?.gems || 0, ...(error ? { error, short } : {}) };
+}
 
 // Plain REST endpoints for solo-mode features and the player profile --
 // separate concern from the 1v1 WebSocket protocol in
 // wsAdapter.js/socketHandlers.js, mounted under /api on the same Express app.
 // Every route requires a Firebase ID token (Authorization: Bearer ...).
-function createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore }) {
+function createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore, dailyStore }) {
   const router = express.Router();
   router.use(express.json());
   router.use(requireAuth);
 
   // Everything the client shows about the player, wallet and prices included.
   async function profile(player, extra) {
-    const gems = await economyStore.ensureWallet(player.playerId);
-    return { ...player, gems, ...extra, serverNow: Date.now(), config: clientConfig };
+    const { gems, hints } = await economyStore.ensureWallet(player.playerId);
+    const loginGift = await economyStore.loginGift(player.playerId);
+    return { ...player, gems, hints, loginGift, ...extra, serverNow: Date.now(), config: clientConfig };
   }
 
   // Called by the client on every launch once signed in: creates the player
@@ -66,27 +77,94 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
     res.json(await profile(player, { merged, isNew: false }));
   });
 
-  // Spends gems on one use of a powerup, priced by the server:
-  //   { item: 'continue', attemptId, puzzleId, index, key }  +30s on Time's Up
-  //   { item: 'replay', puzzleId, key }                      History replay
+  // Spends on one use of a powerup, priced by the server:
+  //   { item: 'continue', attemptId, puzzleId, index, key }  +30s on Time's Up (gems)
+  //   { item: 'replay', puzzleId, key }                      History replay (gems)
+  //   { item: 'hint', puzzleId, key }                        reveal one letter (1 hint)
+  //   { item: 'hint-pack', key }                             MORE HINTS (gems -> hints)
   // key makes a retry idempotent (same key never charges twice). The client
   // applies the effect only after this succeeds.
-  //   200 { gems, price } | 402 { error: 'insufficient-gems', gems, price }
+  //   200 { gems, hints, price } | 402 { error: 'insufficient', short, gems, hints, price }
   router.post('/economy/spend', async (req, res) => {
     const { item, attemptId, puzzleId, key } = req.body || {};
     const index = Number.isInteger(req.body?.index) ? req.body.index : 0;
-    if (!SPEND_ITEMS.includes(item) || !ID_PATTERN.test(puzzleId || '') || !ID_PATTERN.test(key || '')
+    if (!SPEND_ITEMS.includes(item) || !ID_PATTERN.test(key || '')
+      || ((NEEDS_PUZZLE.includes(item) || puzzleId) && !ID_PATTERN.test(puzzleId || ''))
       || (item === 'continue' && !ID_PATTERN.test(attemptId || '')) || index < 0 || index > 100) {
       return res.status(400).json({ error: 'invalid-spend' });
     }
 
     await economyStore.ensureWallet(req.uid);
-    const price = await economyStore.priceFor(req.uid, { item, attemptId, index });
+    const { cost, grant } = await economyStore.priceFor(req.uid, { item, attemptId, index });
     const context = item === 'continue' ? { attemptId, puzzleId, index } : { puzzleId };
-    const result = await economyStore.spend(req.uid, { item, key, price, context });
-    if (result.error === 'insufficient-gems') return res.status(402).json(result);
-    if (result.error) return res.status(409).json(result);
+    const result = await economyStore.apply(req.uid, { item, key, cost, grant, context });
+    if (result.error === 'insufficient') return res.status(402).json(walletResponse(result));
+    if (result.error) return res.status(409).json(walletResponse(result));
+    res.json(walletResponse(result));
+  });
+
+  // MORE HINTS > WATCH AD finished: +1 hint, capped per day.
+  //   200 { gems, hints } | 429 { error: 'ad-cap', gems, hints }
+  router.post('/economy/ad-hint', async (req, res) => {
+    const key = req.body?.key;
+    if (!ID_PATTERN.test(key || '')) return res.status(400).json({ error: 'invalid-claim' });
+    await economyStore.ensureWallet(req.uid);
+    const result = await economyStore.claimAdHint(req.uid, key);
+    if (result.error === 'ad-cap') return res.status(429).json(walletResponse(result));
+    if (result.error) return res.status(409).json(walletResponse(result));
+    res.json(walletResponse(result));
+  });
+
+  // ------------------------------------------------------- Login Gift
+
+  // First launch of each UTC day: the next step of the 7-day cycle.
+  //   200 { gems, hints, claimedToday, index, amount } | 409 { error: 'claimed', ... }
+  router.post('/login-gift/claim', async (req, res) => {
+    await economyStore.ensureWallet(req.uid);
+    const result = await economyStore.claimLoginGift(req.uid);
+    res.status(result.error ? 409 : 200).json({
+      gems: result.gems, hints: result.hints, claimedToday: result.claimedToday, index: result.index,
+      amount: result.amount || 0, ...(result.error ? { error: result.error } : {}),
+    });
+  });
+
+  // ----------------------------------------------------- Daily Puzzle
+
+  // Today's state for the home tile (no puzzle) + any unseen top-3 prize.
+  router.get('/daily', async (req, res) => {
+    res.json(await dailyStore.status(req.uid));
+  });
+
+  // Starts (or resumes) today's attempt; the clock runs from the first call.
+  router.post('/daily/start', async (req, res) => {
+    res.json(await dailyStore.start(req.uid));
+  });
+
+  // One swipe: { day, cells: [{ row, col }, ...] }. The server checks it
+  // against the hidden placements and timestamps each word (see DailyStore).
+  //   200 { word|null, cells, foundCount, solved, timeMs?, rank?, players? } | 400/409 { error }
+  router.post('/daily/word', async (req, res) => {
+    const { day, cells } = req.body || {};
+    if (!DAY_PATTERN.test(day || '') || !Array.isArray(cells)) return res.status(400).json({ error: 'invalid-word' });
+    const result = await dailyStore.submitWord(req.uid, { day, cells });
+    if (result.error) return res.status(result.error === 'invalid-cells' ? 400 : 409).json(result);
     res.json(result);
+  });
+
+  // ?day=today | yesterday | YYYY-MM-DD
+  router.get('/daily/leaderboard', async (req, res) => {
+    const today = utcDay();
+    const asked = req.query.day || 'today';
+    const day = asked === 'today' ? today : asked === 'yesterday' ? previousDay(today) : asked;
+    if (!DAY_PATTERN.test(day)) return res.status(400).json({ error: 'invalid-day' });
+    res.json(await dailyStore.leaderboard(req.uid, day));
+  });
+
+  router.post('/daily/prize-seen', async (req, res) => {
+    const day = req.body?.day;
+    if (!DAY_PATTERN.test(day || '')) return res.status(400).json({ error: 'invalid-day' });
+    await dailyStore.markPrizeSeen(req.uid, day);
+    res.json({ ok: true });
   });
 
   router.get('/stats', async (_req, res) => {

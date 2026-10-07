@@ -12,6 +12,7 @@ const PuzzleShareStore = require('./game/PuzzleShareStore');
 const StatsStore = require('./game/StatsStore');
 const PlayerStore = require('./game/PlayerStore');
 const EconomyStore = require('./game/EconomyStore');
+const DailyStore = require('./game/DailyStore');
 const { initFirebase } = require('./auth/firebaseAuth');
 const { renderDeleteAccountPage } = require('./web/deleteAccountPage');
 const { renderPrivacyPage } = require('./web/privacyPage');
@@ -28,6 +29,9 @@ async function main() {
   const playerStore = new PlayerStore(db);
   const economyStore = new EconomyStore(db);
   await economyStore.init();
+  const dailyStore = new DailyStore(db, { economyStore, playerStore });
+  await dailyStore.init();
+  dailyStore.scheduleFinalizer(); // closes each UTC day and pays the top 3
 
   const app = express();
   const server = http.createServer(app);
@@ -54,10 +58,10 @@ async function main() {
   });
 
   app.use('/api/ads', createAdsRouter({ economyStore }));
-  app.use('/api', createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore }));
+  app.use('/api', createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore, dailyStore }));
 
   const roomManager = new RoomManager();
-  registerSocketHandlers(io, roomManager, playerStore);
+  registerSocketHandlers(io, roomManager, playerStore, economyStore);
 
   server.listen(PORT, () => {
     console.log(`Server up and running on port:${PORT}`);

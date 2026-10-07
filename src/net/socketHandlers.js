@@ -20,11 +20,20 @@ function emitMatchStart(io, room) {
 
 // Trophies only ever apply to ranked (Quick Match) rooms -- Create/Join Room
 // stays casual with no trophy stakes. Ties get no trophy change either way.
+// The winner also gets the hint reward for a first-time arena (0 if none).
 async function applyRankedResult(room, winner, loserId, playerStore) {
   if (room.mode !== 'ranked' || !winner || winner === 'tie' || !loserId) return [];
   const result = await playerStore.applyMatchResult(winner, loserId);
+  let hintsAwarded = 0;
+  if (economyStore) {
+    try {
+      hintsAwarded = await economyStore.grantArenaHints(winner, result.winner.trophies - result.winner.delta, result.winner.trophies);
+    } catch (err) {
+      console.error('[economy] arena hints failed:', err.message);
+    }
+  }
   return [
-    { playerId: result.winner.playerId, trophies: result.winner.trophies, delta: result.winner.delta },
+    { playerId: result.winner.playerId, trophies: result.winner.trophies, delta: result.winner.delta, hintsAwarded },
     { playerId: result.loser.playerId, trophies: result.loser.trophies, delta: result.loser.delta },
   ];
 }
@@ -255,7 +264,11 @@ function handleRoomReady(io, room) {
   emitMatchStart(io, room);
 }
 
-function registerSocketHandlers(io, roomManager, playerStore) {
+// Set by registerSocketHandlers; used for the arena hint reward.
+let economyStore = null;
+
+function registerSocketHandlers(io, roomManager, playerStore, economy = null) {
+  economyStore = economy;
   roomManager.onRoomReady((room) => handleRoomReady(io, room));
 
   io.on('connection', (socket) => {

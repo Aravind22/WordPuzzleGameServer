@@ -10,14 +10,17 @@ function createAdsRouter({ economyStore, verify = verifySsv }) {
 
   router.get('/ssv', async (req, res) => {
     const rawQuery = req.originalUrl.split('?')[1] || '';
-    let valid;
+    let result;
     try {
-      valid = await verify(rawQuery);
+      result = await verify(rawQuery);
     } catch (err) {
       console.error('[ads] ssv verification error:', err.message);
       return res.status(500).json({ error: 'verification-unavailable' });
     }
-    if (!valid) return res.status(403).json({ error: 'bad-signature' });
+    if (!result.valid) {
+      console.warn(`[ads] ssv rejected (${result.reason}): ${rawQuery.slice(0, 600)}`);
+      return res.status(403).json({ error: 'bad-signature', reason: result.reason });
+    }
 
     const q = new URLSearchParams(rawQuery);
     // AdMob's "verify URL" check carries no user/transaction: 200, no-op.

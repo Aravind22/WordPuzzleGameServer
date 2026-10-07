@@ -14,6 +14,7 @@ const PlayerStore = require('./game/PlayerStore');
 const EconomyStore = require('./game/EconomyStore');
 const { initFirebase } = require('./auth/firebaseAuth');
 const { renderDeleteAccountPage } = require('./web/deleteAccountPage');
+const { renderPrivacyPage } = require('./web/privacyPage');
 const { connectDb } = require('./db');
 
 const PORT = process.env.PORT || 6969;
@@ -34,10 +35,10 @@ async function main() {
 
   app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
-  // Privacy policy (Play listing, AdMob consent message): the page itself is
-  // kept on GitHub Pages; this gives it a stable URL on our own domain.
+  // Public privacy policy (Play listing, Data safety, AdMob consent message).
+  const privacyHtml = renderPrivacyPage();
   app.get('/privacy', (_req, res) => {
-    res.redirect(302, 'https://aravind22.github.io/TempContactsPrivacyPolicy/wordpuzzle/');
+    res.set('Cache-Control', 'no-cache').type('html').send(privacyHtml);
   });
 
   // Public account-deletion request page (Play Data safety "delete account"

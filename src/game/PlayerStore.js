@@ -63,8 +63,9 @@ class PlayerStore {
   // account on this device, then signed into Play Games/Google which
   // already belongs to an older account. Folds the guest into the saved
   // account and deletes the guest's player record. The saved account's
-  // profile and trophies win; purchased currency moves over once the
-  // wallet exists (Phase 2), free starter grants never do.
+  // profile, trophies and gems win. Free gems (the starter grant -- all
+  // there is until real-money purchases) never move over; purchased gems
+  // will, once the Store exists.
   // Returns the saved account's player.
   async mergeGuestInto(targetId, guestId) {
     const guest = await this.collection.findOne({ _id: guestId });

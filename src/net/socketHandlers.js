@@ -6,10 +6,11 @@ const logMm = debug('mm'); // matchmaking: findMatch requests + pairing outcomes
 
 function matchStartPayload(room) {
   return {
+    mode: room.mode,
     grid: room.grid,
     gridSize: room.gridSize,
     words: room.placedWords.map((p) => p.word),
-    players: room.players.map((p) => ({ playerId: p.playerId, name: p.name })),
+    players: room.players.map((p) => ({ playerId: p.playerId, name: p.name, trophies: p.trophies || 0 })),
   };
 }
 
@@ -28,8 +29,50 @@ async function applyRankedResult(room, winner, loserId, playerStore) {
   ];
 }
 
-function handleCreateRoom(socket, roomManager) {
+// Tells the other player that playerId's open rematch offer is gone (they
+// left, disconnected or started something else).
+function withdrawRematch(io, roomManager, playerId) {
+  const record = roomManager.cancelRematch(playerId);
+  if (!record) return;
+  logSocket('rematch %s withdrawn by %s', record.id, playerId);
+  for (const p of record.players) {
+    if (p.playerId !== playerId) io.to(p.socketId).emit('rematchDeclined');
+  }
+}
+
+// A private-room match that ended normally stays open for a rematch.
+function openRematch(io, roomManager, room) {
+  if (room.mode !== 'unranked') return;
+  roomManager.openRematch(room, (record) => {
+    logSocket('rematch %s expired', record.id);
+    for (const p of record.players) io.to(p.socketId).emit('rematchDeclined');
+  });
+}
+
+function handleRematch(socket, roomManager, io) {
   const { playerId, name } = socket.data;
+  const result = roomManager.requestRematch(playerId, socket.id);
+  if (result.error) {
+    logSocket('rematch %s: %s', playerId, result.error);
+    return socket.emit('errorMsg', { code: result.error });
+  }
+  if (!result.room) {
+    logSocket('rematch %s requested by %s', result.record.id, playerId);
+    for (const p of result.record.players) {
+      if (p.playerId !== playerId) io.to(p.socketId).emit('rematchRequested', { name });
+    }
+    return;
+  }
+
+  const room = result.room;
+  logSocket('rematch %s -> room %s', result.record.id, room.id);
+  for (const p of room.players) io.sockets.sockets.get(p.socketId)?.join(room.id);
+  emitMatchStart(io, room);
+}
+
+function handleCreateRoom(socket, roomManager, io) {
+  const { playerId, name } = socket.data;
+  withdrawRematch(io, roomManager, playerId);
   const room = roomManager.createRoom({ playerId, socketId: socket.id, name }, 'unranked');
   logSocket('createRoom %s (%s) -> room %s', playerId, name, room.id);
   socket.join(room.id);
@@ -40,6 +83,7 @@ function handleJoinRoom(socket, roomManager, io, code) {
   const { playerId, name } = socket.data;
   logSocket('joinRoom %s (%s) -> %s', playerId, name, code);
   if (!code) return socket.emit('errorMsg', { code: 'invalid-request' });
+  withdrawRematch(io, roomManager, playerId);
 
   const result = roomManager.joinRoom(String(code).toUpperCase(), { playerId, socketId: socket.id, name });
   if (result.error) {
@@ -61,14 +105,16 @@ function handleJoinRoom(socket, roomManager, io, code) {
 async function handleFindMatch(socket, roomManager, io, playerStore) {
   const { playerId, name } = socket.data;
   logMm('findMatch %s (%s) requested', playerId, name);
+  withdrawRematch(io, roomManager, playerId);
   let arena;
+  let trophies;
   try {
-    ({ player: { arena } } = await playerStore.getOrCreate(playerId));
+    ({ player: { arena, trophies } } = await playerStore.getOrCreate(playerId));
   } catch (err) {
     console.error(`[mm] findMatch ${playerId} playerStore.getOrCreate failed:`, err);
     return socket.emit('errorMsg', { code: 'find-match-failed' });
   }
-  roomManager.queueForMatch({ playerId, socketId: socket.id, name, arena });
+  roomManager.queueForMatch({ playerId, socketId: socket.id, name, arena, trophies });
   logMm('findMatch %s queued arena=%s queueLength=%d', playerId, arena, roomManager.queue.length);
   // Pairing (and matchStart emission) happens asynchronously on the
   // matchmaker's next tick, via the onRoomReady callback registered in
@@ -102,6 +148,7 @@ async function handleSubmitWord(socket, roomManager, io, cells, playerStore) {
     const loserId = winner !== 'tie' ? room.otherPlayer(winner)?.playerId : null;
     const trophyChanges = await applyRankedResult(room, winner, loserId, playerStore);
     io.to(room.id).emit('gameOver', { winner, scores, trophyChanges });
+    openRematch(io, roomManager, room);
     room.clearAllTimers();
     roomManager.closeRoom(room.id);
   }
@@ -111,6 +158,7 @@ function handleLeaveRoom(socket, roomManager, io, playerStore) {
   const { playerId } = socket.data;
   logSocket('leaveRoom %s', playerId);
   roomManager.cancelFindMatch(playerId);
+  withdrawRematch(io, roomManager, playerId);
 
   const room = roomManager.getRoomByPlayerId(playerId);
   if (!room) return;
@@ -157,6 +205,7 @@ function handleDisconnect(socket, roomManager, io, playerStore) {
   logSocket('disconnect %s playerId=%s', socket.shortId, playerId);
   if (!playerId) return;
   roomManager.cancelFindMatch(playerId);
+  withdrawRematch(io, roomManager, playerId);
 
   const room = roomManager.getRoomByPlayerId(playerId);
   if (!room || room.status !== 'playing') return;
@@ -213,12 +262,13 @@ function registerSocketHandlers(io, roomManager, playerStore) {
     logSocket('connection %s playerId=%s', socket.shortId, socket.data.playerId);
     // socket.data.{playerId,name} is already populated by the wsAdapter
     // (from the verified Firebase token, before the handshake completes).
-    socket.on('createRoom', () => handleCreateRoom(socket, roomManager));
+    socket.on('createRoom', () => handleCreateRoom(socket, roomManager, io));
     socket.on('joinRoom', ({ code } = {}) => handleJoinRoom(socket, roomManager, io, code));
     socket.on('findMatch', () => handleFindMatch(socket, roomManager, io, playerStore));
     socket.on('cancelFindMatch', () => handleCancelFindMatch(socket, roomManager));
     socket.on('submitWord', ({ cells } = {}) => handleSubmitWord(socket, roomManager, io, cells, playerStore));
     socket.on('leaveRoom', () => handleLeaveRoom(socket, roomManager, io, playerStore));
+    socket.on('rematch', () => handleRematch(socket, roomManager, io));
     socket.on('rejoinRoom', ({ code } = {}) => handleRejoinRoom(socket, roomManager, io, code));
     socket.on('disconnect', () => handleDisconnect(socket, roomManager, io, playerStore));
   });

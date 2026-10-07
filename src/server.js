@@ -7,9 +7,11 @@ const { attachWsServer } = require('./net/wsAdapter');
 const RoomManager = require('./net/RoomManager');
 const { registerSocketHandlers } = require('./net/socketHandlers');
 const { createApiRouter } = require('./net/apiRoutes');
+const { createAdsRouter } = require('./net/adsRoutes');
 const PuzzleShareStore = require('./game/PuzzleShareStore');
 const StatsStore = require('./game/StatsStore');
 const PlayerStore = require('./game/PlayerStore');
+const EconomyStore = require('./game/EconomyStore');
 const { initFirebase } = require('./auth/firebaseAuth');
 const { renderDeleteAccountPage } = require('./web/deleteAccountPage');
 const { connectDb } = require('./db');
@@ -23,12 +25,20 @@ async function main() {
   const puzzleShareStore = new PuzzleShareStore(db);
   const statsStore = new StatsStore(db);
   const playerStore = new PlayerStore(db);
+  const economyStore = new EconomyStore(db);
+  await economyStore.init();
 
   const app = express();
   const server = http.createServer(app);
   const io = attachWsServer(server, { playerStore });
 
   app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+
+  // Privacy policy (Play listing, AdMob consent message): the page itself is
+  // kept on GitHub Pages; this gives it a stable URL on our own domain.
+  app.get('/privacy', (_req, res) => {
+    res.redirect(302, 'https://aravind22.github.io/TempContactsPrivacyPolicy/wordpuzzle/');
+  });
 
   // Public account-deletion request page (Play Data safety "delete account"
   // URL). FIREBASE_API_KEY is the app's public web API key; SUPPORT_EMAIL is
@@ -42,7 +52,8 @@ async function main() {
     res.set('Cache-Control', 'no-store').type('html').send(deleteAccountHtml);
   });
 
-  app.use('/api', createApiRouter({ puzzleShareStore, statsStore, playerStore }));
+  app.use('/api/ads', createAdsRouter({ economyStore }));
+  app.use('/api', createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore }));
 
   const roomManager = new RoomManager();
   registerSocketHandlers(io, roomManager, playerStore);

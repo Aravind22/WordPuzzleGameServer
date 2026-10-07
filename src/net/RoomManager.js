@@ -11,12 +11,18 @@ const generateCode = customAlphabet(CODE_ALPHABET, 6);
 const CLEANUP_INTERVAL_MS = 60 * 1000;
 const MATCHMAKER_TICK_MS = 1000;
 const EXPAND_SEARCH_AFTER_MS = 5000;
+const REMATCH_WINDOW_MS = 60 * 1000;
 
 class RoomManager {
   constructor() {
     this.rooms = new Map(); // code -> Room
-    this.queue = []; // [{ playerId, socketId, name, arena, queuedAt }] -- ranked (Quick Match) only
+    this.queue = []; // [{ playerId, socketId, name, arena, trophies, queuedAt }] -- ranked (Quick Match) only
     this.playerToRoom = new Map(); // playerId -> room code, for rejoin lookups
+
+    // Finished private-room matches the two players can replay together:
+    // old room code -> { id, players: [{ playerId, socketId, name }], ready: Set, timer }.
+    this.rematches = new Map();
+    this.playerToRematch = new Map(); // playerId -> old room code
 
     this.cleanupInterval = setInterval(() => this.sweep(), CLEANUP_INTERVAL_MS);
     this.cleanupInterval.unref?.();
@@ -42,10 +48,10 @@ class RoomManager {
     return code;
   }
 
-  createRoom({ playerId, socketId, name }, mode = 'unranked') {
+  createRoom({ playerId, socketId, name, trophies }, mode = 'unranked') {
     const code = this._newRoomCode();
     const room = new Room(code, mode);
-    room.addPlayer({ playerId, socketId, name });
+    room.addPlayer({ playerId, socketId, name, trophies });
     this.rooms.set(code, room);
     this.playerToRoom.set(playerId, code);
     return room;
@@ -67,9 +73,9 @@ class RoomManager {
   // Queues playerId for ranked Quick Match. Pairing happens on the next
   // matchmakerTick(), not synchronously -- arena-aware matching needs to
   // look across everyone currently waiting, not just the two most recent.
-  queueForMatch({ playerId, socketId, name, arena }) {
+  queueForMatch({ playerId, socketId, name, arena, trophies }) {
     this.queue = this.queue.filter((q) => q.playerId !== playerId);
-    this.queue.push({ playerId, socketId, name, arena, queuedAt: Date.now() });
+    this.queue.push({ playerId, socketId, name, arena, trophies, queuedAt: Date.now() });
     logMm('queue += %s (arena=%s) -> [%s]', playerId, arena, this.queue.map((q) => `${q.playerId}/${q.arena}`).join(', '));
   }
 
@@ -136,6 +142,67 @@ class RoomManager {
     logMm('paired %s vs %s -> room %s', a.playerId, b.playerId, room.id);
     if (!this._onRoomReady) console.warn('[mm] no onRoomReady callback registered -- sockets will never be joined to the room');
     this._onRoomReady?.(room);
+  }
+
+  // Keeps a finished private-room match open for a rematch for
+  // REMATCH_WINDOW_MS. onExpire(record) fires if it times out unused.
+  openRematch(room, onExpire) {
+    const record = {
+      id: room.id,
+      players: room.players.map((p) => ({ playerId: p.playerId, socketId: p.socketId, name: p.name })),
+      ready: new Set(),
+      timer: null,
+    };
+    for (const p of record.players) {
+      this.cancelRematch(p.playerId); // one open offer per player
+      this.playerToRematch.set(p.playerId, record.id);
+    }
+    this.rematches.set(record.id, record);
+    record.timer = setTimeout(() => {
+      if (this.rematches.get(record.id) !== record) return;
+      this._closeRematch(record);
+      onExpire?.(record);
+    }, REMATCH_WINDOW_MS);
+    record.timer.unref?.();
+    return record;
+  }
+
+  // Marks playerId ready. Returns { error } if there's nothing to rematch,
+  // { record } while waiting for the other player, or { record, room } once
+  // both are ready (the new room has already started).
+  requestRematch(playerId, socketId) {
+    const record = this.rematches.get(this.playerToRematch.get(playerId));
+    if (!record) return { error: 'rematch-unavailable' };
+    const me = record.players.find((p) => p.playerId === playerId);
+    me.socketId = socketId;
+    record.ready.add(playerId);
+    if (record.ready.size < record.players.length) return { record };
+
+    this._closeRematch(record);
+    const [a, b] = record.players;
+    const room = this.createRoom(a, 'unranked');
+    room.addPlayer(b);
+    this.playerToRoom.set(b.playerId, room.id);
+    room.start();
+    return { record, room };
+  }
+
+  // Withdraws playerId's open rematch offer (they left, disconnected or
+  // started something else). Returns the closed record so the caller can
+  // tell the other player, or undefined if there was none.
+  cancelRematch(playerId) {
+    const record = this.rematches.get(this.playerToRematch.get(playerId));
+    if (!record) return undefined;
+    this._closeRematch(record);
+    return record;
+  }
+
+  _closeRematch(record) {
+    clearTimeout(record.timer);
+    this.rematches.delete(record.id);
+    for (const p of record.players) {
+      if (this.playerToRematch.get(p.playerId) === record.id) this.playerToRematch.delete(p.playerId);
+    }
   }
 
   getRoom(code) {

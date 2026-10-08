@@ -8,11 +8,13 @@ const RoomManager = require('./net/RoomManager');
 const { registerSocketHandlers } = require('./net/socketHandlers');
 const { createApiRouter } = require('./net/apiRoutes');
 const { createAdsRouter } = require('./net/adsRoutes');
+const { createIapRouter } = require('./net/iapRoutes');
 const PuzzleShareStore = require('./game/PuzzleShareStore');
 const StatsStore = require('./game/StatsStore');
 const PlayerStore = require('./game/PlayerStore');
 const EconomyStore = require('./game/EconomyStore');
 const DailyStore = require('./game/DailyStore');
+const IapStore = require('./game/IapStore');
 const { initFirebase } = require('./auth/firebaseAuth');
 const { renderDeleteAccountPage } = require('./web/deleteAccountPage');
 const { renderPrivacyPage } = require('./web/privacyPage');
@@ -32,6 +34,9 @@ async function main() {
   const dailyStore = new DailyStore(db, { economyStore, playerStore });
   await dailyStore.init();
   dailyStore.scheduleFinalizer(); // closes each UTC day and pays the top 3
+  const iapStore = new IapStore(db, { economyStore });
+  await iapStore.init();
+  if (process.env.IAP_ALLOW_FAKE === 'true') console.warn('[iap] IAP_ALLOW_FAKE=true: fake purchase tokens accepted (local testing only!)');
 
   const app = express();
   const server = http.createServer(app);
@@ -58,7 +63,8 @@ async function main() {
   });
 
   app.use('/api/ads', createAdsRouter({ economyStore }));
-  app.use('/api', createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore, dailyStore }));
+  app.use('/api/iap', createIapRouter({ iapStore }));
+  app.use('/api', createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore, dailyStore, iapStore }));
 
   const roomManager = new RoomManager();
   registerSocketHandlers(io, roomManager, playerStore, economyStore);

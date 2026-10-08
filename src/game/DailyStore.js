@@ -1,12 +1,21 @@
 const gridGenerator = require('./gridGenerator');
 const { WordPicker } = require('./wordPicker');
 const { WORDS } = require('./wordBank');
-const { DAILY_PRIZES, DAILY_MIN_MS } = require('./economy');
-const { utcDay, nextResetMs, previousDay } = require('./utcDay');
+const { DAILY_PRIZES: ALL_PRIZES, DAILY_MIN_MS, streakBonus: bonusFor, monetizationOn } = require('./economy');
+
+// Gem prizes / streak bonuses only while monetization is on (MONETIZATION).
+const prizeList = () => (monetizationOn() ? ALL_PRIZES : []);
+const streakBonus = (count) => (monetizationOn() ? bonusFor(count) : 0);
+const PRIZE_SLOTS = ALL_PRIZES.length;
+const { DAY_MS, utcDay, dayStartMs, nextResetMs, previousDay } = require('./utcDay');
 
 const GRID_SIZE = 10;
 const WORDS_PER_PUZZLE = 8;
 const LEADERBOARD_SIZE = 50;
+
+// Daily #1 (the number in the share text). Set to the launch day.
+const FIRST_DAILY = '2026-10-08';
+const dailyNumber = (day) => Math.round((dayStartMs(day) - dayStartMs(FIRST_DAILY)) / DAY_MS) + 1;
 
 // Solved, ranked attempts of a day.
 const ranked = (day) => ({ day, solvedAt: { $exists: true }, void: { $ne: true } });
@@ -39,8 +48,14 @@ function isStraightLine(cells) {
 //                    rank?, prize?, prizeSeen? }
 //   (void = solved faster than DAILY_MIN_MS: kept, but never ranked or paid)
 //   daily_results  { _id: day, finalizedAt, players, winners: [{ playerId, name, rank, timeMs, prize }] }
+//   players.dailyStreak { day: last solved day, count, best }
+//
+// Streak: consecutive days with the Daily solved (void solves don't count).
+// Reaching a streakBonus length pays gems on the spot (attempt.streak /
+// attempt.streakBonus record it for the solved card).
 class DailyStore {
   constructor(db, { economyStore, playerStore }) {
+    this.players = db.collection('players');
     this.puzzles = db.collection('daily_puzzles');
     this.attempts = db.collection('daily_attempts');
     this.results = db.collection('daily_results');
@@ -93,17 +108,55 @@ class DailyStore {
     return puzzle.placements.filter((pl) => found[pl.word]).map((pl) => ({ word: pl.word, cells: pl.cells }));
   }
 
+  // The streak as of today: still alive if the last solve was today or
+  // yesterday. { count, best }
+  static streakState(streak, today) {
+    const alive = streak?.day === today || streak?.day === previousDay(today);
+    return { count: alive ? streak.count : 0, best: streak?.best || 0 };
+  }
+
+  async streakOf(playerId, today) {
+    const doc = await this.players.findOne({ _id: playerId }, { projection: { dailyStreak: 1 } });
+    return DailyStore.streakState(doc?.dailyStreak, today);
+  }
+
+  // A (non-void) solve of day: extends the streak (or starts a new one) and
+  // pays its bonus, if any. The day field is the lock: a day counts once.
+  // Returns { count, best, bonus, gems?, hints? }.
+  async advanceStreak(playerId, day) {
+    const doc = await this.players.findOne({ _id: playerId }, { projection: { dailyStreak: 1 } });
+    const prev = doc?.dailyStreak;
+    if (prev?.day === day) return { count: prev.count, best: prev.best, bonus: 0 };
+    const count = prev?.day === previousDay(day) ? prev.count + 1 : 1;
+    const best = Math.max(prev?.best || 0, count);
+    const moved = await this.players.updateOne(
+      { _id: playerId, 'dailyStreak.day': { $ne: day } },
+      { $set: { dailyStreak: { day, count, best } } }
+    );
+    if (!moved.modifiedCount) return { ...(await this.streakOf(playerId, day)), bonus: 0 };
+    const bonus = streakBonus(count);
+    if (!bonus) return { count, best, bonus };
+    await this.economyStore.ensureWallet(playerId); // starter gems before the $inc creates the field
+    const wallet = await this.economyStore.apply(playerId, { item: 'daily-streak', key: day, grant: { gems: bonus }, context: { day, streak: count } });
+    return wallet.error ? { count, best, bonus: 0 } : { count, best, bonus, gems: wallet.gems, hints: wallet.hints };
+  }
+
   // The player's state for today (no puzzle): for the home tile and the
   // solved card. Also carries an unseen top-3 prize from an earlier day.
   async status(playerId, now = Date.now()) {
     const day = utcDay(now);
     const attempt = await this.attempts.findOne({ _id: `${day}:${playerId}` });
+    const streak = await this.streakOf(playerId, day);
     const out = {
       day,
+      number: dailyNumber(day),
+      streak: streak.count,
+      bestStreak: streak.best,
+      streakBonus: attempt?.streakBonus || 0,
       endsAt: nextResetMs(now),
       serverNow: now,
       players: await this.attempts.countDocuments(ranked(day)),
-      prizes: DAILY_PRIZES,
+      prizes: prizeList(),
       state: attempt ? (attempt.solvedAt ? 'solved' : 'started') : 'new',
       startedAt: attempt?.startedAt || 0,
       timeMs: attempt?.timeMs || 0,
@@ -134,6 +187,8 @@ class DailyStore {
     const attempt = await this.attempts.findOne({ _id: id });
     return {
       day,
+      number: dailyNumber(day),
+      streak: (await this.streakOf(playerId, day)).count,
       puzzle: DailyStore.clientPuzzle(puzzle),
       found: DailyStore.foundList(puzzle, attempt),
       startedAt: attempt.startedAt,
@@ -149,7 +204,8 @@ class DailyStore {
   // last word finishes the attempt. Returns
   //   { word: null }                                   not a word (or already found)
   //   { word, cells, foundCount, solved: false }
-  //   { word, cells, foundCount, solved: true, timeMs, rank, players, void? }
+  //   { word, cells, foundCount, solved: true, timeMs, rank, players, void?,
+  //     streak, streakBonus, gems?, hints? }   (gems/hints: after a bonus)
   //   { error }: 'not-started', 'wrong-day' (the day ended), 'solved', 'invalid-cells'
   async submitWord(playerId, { day, cells }, now = Date.now()) {
     if (day !== utcDay(now)) return { error: 'wrong-day' };
@@ -179,10 +235,17 @@ class DailyStore {
     const finishedAt = Math.max(...Object.values(updated.found));
     const timeMs = finishedAt - updated.startedAt;
     const { player } = await this.playerStore.getOrCreate(playerId);
-    await this.attempts.updateOne(
+    const isVoid = timeMs < DAILY_MIN_MS;
+    const finished = await this.attempts.updateOne(
       { _id: id, solvedAt: { $exists: false } },
-      { $set: { solvedAt: finishedAt, timeMs, name: player.name, ...(timeMs < DAILY_MIN_MS ? { void: true } : {}) } }
+      { $set: { solvedAt: finishedAt, timeMs, name: player.name, ...(isVoid ? { void: true } : {}) } }
     );
+    // Only the request that finished the attempt moves the streak.
+    let streak = null;
+    if (finished.modifiedCount && !isVoid) {
+      streak = await this.advanceStreak(playerId, day);
+      await this.attempts.updateOne({ _id: id }, { $set: { streak: streak.count, streakBonus: streak.bonus } });
+    }
     const solved = await this.attempts.findOne({ _id: id });
     return {
       ...out,
@@ -191,6 +254,9 @@ class DailyStore {
       rank: solved.void ? 0 : await this.rankOf(solved),
       players: await this.attempts.countDocuments(ranked(day)),
       ...(solved.void ? { void: true } : {}),
+      streak: streak ? streak.count : (await this.streakOf(playerId, day)).count,
+      streakBonus: solved.streakBonus || 0,
+      ...(streak?.bonus ? { gems: streak.gems, hints: streak.hints } : {}),
     };
   }
 
@@ -216,8 +282,8 @@ class DailyStore {
       endsAt: day === utcDay(now) ? nextResetMs(now) : 0,
       serverNow: now,
       players: await this.attempts.countDocuments(solvedFilter),
-      prizes: DAILY_PRIZES,
-      rows: top.map((a, i) => ({ rank: i + 1, name: a.name || 'PLAYER', timeMs: a.timeMs, prize: DAILY_PRIZES[i] || 0, me: a.playerId === playerId })),
+      prizes: prizeList(),
+      rows: top.map((a, i) => ({ rank: i + 1, name: a.name || 'PLAYER', timeMs: a.timeMs, prize: prizeList()[i] || 0, me: a.playerId === playerId })),
       me: mine ? { rank: await this.rankOf(mine), timeMs: mine.timeMs } : null,
     };
   }
@@ -233,9 +299,9 @@ class DailyStore {
     if (day >= utcDay()) return null; // still running
     if (await this.results.findOne({ _id: day })) return null;
     const top = await this.attempts.find(ranked(day))
-      .sort({ timeMs: 1, solvedAt: 1 }).limit(DAILY_PRIZES.length).toArray();
+      .sort({ timeMs: 1, solvedAt: 1 }).limit(PRIZE_SLOTS).toArray();
     const players = await this.attempts.countDocuments(ranked(day));
-    const winners = top.map((a, i) => ({ playerId: a.playerId, name: a.name, rank: i + 1, timeMs: a.timeMs, prize: DAILY_PRIZES[i] }));
+    const winners = top.map((a, i) => ({ playerId: a.playerId, name: a.name, rank: i + 1, timeMs: a.timeMs, prize: prizeList()[i] || 0 }));
     try {
       await this.results.insertOne({ _id: day, finalizedAt: Date.now(), players, winners });
     } catch (err) {
@@ -243,7 +309,8 @@ class DailyStore {
       throw err;
     }
     for (const w of winners) {
-      await this.economyStore.grantDailyPrize(w.playerId, day, w.rank, w.prize);
+      // Monetization off: still ranked, but no gems.
+      if (w.prize) await this.economyStore.grantDailyPrize(w.playerId, day, w.rank, w.prize);
       await this.attempts.updateOne({ _id: `${day}:${w.playerId}` }, { $set: { rank: w.rank, prize: w.prize } });
     }
     console.log(`[daily] ${day} finalized: ${players} players, winners ${winners.map((w) => `${w.rank}:${w.playerId}`).join(' ')}`);
@@ -271,3 +338,4 @@ class DailyStore {
 
 module.exports = DailyStore;
 module.exports.previousDay = previousDay;
+module.exports.dailyNumber = dailyNumber;

@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { arenaForTrophies } = require('./arena');
 const {
-  STARTER_GEMS, STARTER_HINTS, REPLAY_PRICE, HINT_PACK, AD_HINTS_PER_DAY, ARENA_HINTS, LOGIN_GIFTS, continuePrice,
+  STARTER_GEMS, STARTER_HINTS, REPLAY_PRICE, HINT_PACK, HINT_PACK_10, AD_HINTS_PER_DAY, AD_GEMS, AD_GEMS_PER_DAY, AD_CONTINUES_PER_DAY, ARENA_HINTS, LOGIN_GIFTS, continuePrice, monetizationOn,
 } = require('./economy');
 const { utcDay, previousDay } = require('./utcDay');
 
@@ -35,6 +35,7 @@ class EconomyStore {
   // and the arena high-water mark for the arena reward. Free grants are
   // never merged into another account. Returns { gems, hints }.
   async ensureWallet(playerId) {
+    if (!monetizationOn()) return this.wallet(playerId); // granted once it's back on
     await this._starter(playerId, 'gems', STARTER_GEMS, 'grant:starter', 'starter');
     await this._starter(playerId, 'hints', STARTER_HINTS, 'grant:starter-hints', 'starter-hints');
     const doc = await this.players.findOne({ _id: playerId }, { projection: { trophies: 1, arenaBest: 1 } });
@@ -61,6 +62,7 @@ class EconomyStore {
       case 'replay': return { cost: { gems: REPLAY_PRICE }, grant: {} };
       case 'hint': return { cost: { hints: 1 }, grant: {} };
       case 'hint-pack': return { cost: { gems: HINT_PACK.gems }, grant: { hints: HINT_PACK.hints } };
+      case 'hint-pack-10': return { cost: { gems: HINT_PACK_10.gems }, grant: { hints: HINT_PACK_10.hints } };
       case 'continue': {
         const used = await this.ledger.countDocuments({
           playerId, reason: { $in: CONTINUE_REASONS }, 'context.attemptId': attemptId, status: 'done',
@@ -110,20 +112,90 @@ class EconomyStore {
     return { ...balances, cost, grant };
   }
 
-  // MORE HINTS > WATCH AD: +1 hint after the client saw the reward, capped
-  // at AD_HINTS_PER_DAY per UTC day. (Granted on the client's word because
-  // AdMob's server-side callback only arrives for approved, real ad units;
-  // the cap bounds the abuse.) Returns apply()'s result or { error: 'ad-cap' }.
-  async claimAdHint(playerId, key) {
+  // MORE HINTS > WATCH AD: +1 hint per rewarded ad, capped at
+  // AD_HINTS_PER_DAY per UTC day. key is the client's claim key, also sent
+  // to AdMob as custom_data "hint:<key>", so either side can grant it first
+  // and the other finds it done: AdMob's signed SSV callback (verified) or
+  // the client's claim once it has waited for that callback (unverified --
+  // test ad units never call SSV). A late SSV marks an unverified grant
+  // verified. Returns apply()'s result or { error: 'ad-cap' }.
+  async claimAdHint(playerId, key, { verified = false } = {}) {
+    return this._claimAdReward(playerId, 'ad-hint', key, { hints: 1 }, AD_HINTS_PER_DAY, verified);
+  }
+
+  // Store > FREE GEMS: AD_GEMS per rewarded ad, AD_GEMS_PER_DAY per UTC
+  // day; same SSV-first claim as ad hints (custom_data "gems:<key>").
+  async claimAdGems(playerId, key, { verified = false } = {}) {
+    return this._claimAdReward(playerId, 'ad-gems', key, { gems: AD_GEMS }, AD_GEMS_PER_DAY, verified);
+  }
+
+  async _claimAdReward(playerId, reason, key, grant, perDay, verified) {
+    const prior = await this._adClaim(playerId, `${reason}:${key}`, verified);
+    if (prior) return prior;
     const day = utcDay();
-    const today = await this.ledger.countDocuments({ playerId, reason: 'ad-hint', 'context.day': day, status: 'done' });
-    if (today >= AD_HINTS_PER_DAY) return { error: 'ad-cap', ...(await this.wallet(playerId)) };
-    return this.apply(playerId, { item: 'ad-hint', key, grant: { hints: 1 }, context: { day } });
+    if (await this._adsOn(playerId, reason, day) >= perDay) return { error: 'ad-cap', ...(await this.wallet(playerId)) };
+    return this.apply(playerId, { item: reason, key, grant, context: { day, verified } });
+  }
+
+  // Time's Up > WATCH AD: the +30s itself is the client's (solo clocks run
+  // there); the server holds the rules. Only an attempt's first continue,
+  // once per attempt (a retry returns the same answer), at most
+  // AD_CONTINUES_PER_DAY per UTC day. Counts toward the gem continue's
+  // escalation. Returns the wallet or { error: 'ad-cap' | 'ad-used' }.
+  async claimAdContinue(playerId, attemptId, puzzleId) {
+    const prior = await this._adClaim(playerId, `ad-continue:${attemptId}`, false);
+    if (prior) return prior;
+    const used = await this.ledger.countDocuments({
+      playerId, reason: { $in: CONTINUE_REASONS }, 'context.attemptId': attemptId, status: 'done',
+    });
+    if (used > 0) return { error: 'ad-used', ...(await this.wallet(playerId)) };
+    const day = utcDay();
+    if (await this._adsOn(playerId, 'ad-continue', day) >= AD_CONTINUES_PER_DAY) return { error: 'ad-cap', ...(await this.wallet(playerId)) };
+    return this.apply(playerId, { item: 'ad-continue', key: attemptId, context: { attemptId, puzzleId, day, verified: false } });
+  }
+
+  // Today's rewarded-ad claims, for /me: { hints, continues, gems }.
+  async adsToday(playerId) {
+    const day = utcDay();
+    return {
+      hints: await this._adsOn(playerId, 'ad-hint', day),
+      continues: await this._adsOn(playerId, 'ad-continue', day),
+      gems: await this._adsOn(playerId, 'ad-gems', day),
+    };
+  }
+
+  // Polls (up to waitMs) for a ledger entry another request is writing --
+  // the SSV callback's grant for a claim key. True once it is done.
+  async waitForEntry(playerId, entryKey, waitMs) {
+    const until = Date.now() + waitMs;
+    for (;;) {
+      const entry = await this.ledger.findOne({ playerId, key: entryKey }, { projection: { status: 1 } });
+      if (entry?.status === 'done') return true;
+      if (Date.now() >= until) return false;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+  }
+
+  // An ad claim already made under entryKey: the wallet (marking it
+  // verified when SSV confirms it now), or null.
+  async _adClaim(playerId, entryKey, verified) {
+    const prior = await this.ledger.findOne({ playerId, key: entryKey });
+    if (!prior) return null;
+    if (prior.status !== 'done') return { error: 'in-progress' };
+    if (verified && !prior.context?.verified) {
+      await this.ledger.updateOne({ _id: prior._id }, { $set: { 'context.verified': true } });
+    }
+    return { ...(await this.wallet(playerId)), cost: {}, grant: { ...prior.delta } };
+  }
+
+  _adsOn(playerId, reason, day) {
+    return this.ledger.countDocuments({ playerId, reason, 'context.day': day, status: 'done' });
   }
 
   // Ranked win: ARENA_HINTS for each arena reached for the first time ever
   // (dropping back and re-entering pays nothing). Returns hints awarded.
   async grantArenaHints(playerId, trophiesBefore, trophiesAfter) {
+    if (!monetizationOn()) return 0;
     // No high-water mark yet (hasn't opened the game since this shipped):
     // it's the arena they were in before this match.
     await this.players.updateOne(
@@ -184,24 +256,33 @@ class EconomyStore {
   }
 
   // A rewarded ad the player watched to the end, confirmed by AdMob's
-  // server-side verification callback (see ads/ssv.js). Recorded once per
-  // transaction; custom_data "continue:<attemptId>" marks the Time's Up
-  // continue, which grants time (client side) rather than gems.
+  // server-side verification callback (see ads/ssv.js). Logged once per
+  // transaction, then acted on by custom_data:
+  //   "hint:<key>"           grants that ad-hint claim (or verifies it)
+  //   "gems:<key>"           same for a Store FREE GEMS claim
+  //   "continue:<attemptId>" verifies the attempt's ad-continue claim (the
+  //                          time itself is granted client side)
   async recordAdReward({ playerId, transactionId, customData, adUnit, rewardItem, rewardAmount }) {
     if (!playerId || !transactionId) return false;
     const exists = await this.players.countDocuments({ _id: playerId }, { limit: 1 });
     if (!exists) return false;
 
-    const match = /^continue:([A-Za-z0-9_-]{1,64})$/.exec(customData || '');
     await this._insertIgnoringDuplicate({
       playerId,
       key: `ssv:${transactionId}`,
       delta: {},
-      reason: match ? 'ad-continue' : 'ad-reward',
-      context: { attemptId: match?.[1], adUnit, rewardItem, rewardAmount, customData },
+      reason: 'ad-reward',
+      context: { adUnit, rewardItem, rewardAmount, customData },
       status: 'done',
       at: Date.now(),
     });
+
+    const [, kind, id] = /^(hint|gems|continue):([A-Za-z0-9_-]{1,64})$/.exec(customData || '') || [];
+    if (kind === 'hint') await this.claimAdHint(playerId, id, { verified: true });
+    if (kind === 'gems') await this.claimAdGems(playerId, id, { verified: true });
+    if (kind === 'continue') {
+      await this.ledger.updateOne({ playerId, key: `ad-continue:${id}` }, { $set: { 'context.verified': true } });
+    }
     return true;
   }
 

@@ -1,11 +1,12 @@
 const express = require('express');
 const { requireAuth, verifyIdToken, hasAdminCredentials, deleteFirebaseUser } = require('../auth/firebaseAuth');
-const { clientConfig } = require('../game/economy');
+const { clientConfig, AD_SSV_WAIT_MS, monetizationOn } = require('../game/economy');
 const { utcDay, previousDay } = require('../game/utcDay');
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/; // a UTC day, 'YYYY-MM-DD'
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
-const SPEND_ITEMS = ['continue', 'replay', 'hint', 'hint-pack'];
+const SPEND_ITEMS = ['continue', 'replay', 'hint', 'hint-pack', 'hint-pack-10'];
+const PRODUCT_PATTERN = /^[a-z0-9_.]{1,64}$/;
 const NEEDS_PUZZLE = ['continue', 'replay', 'hint'];
 
 // Wallet responses: balances plus the gem price paid (402s carry which
@@ -19,7 +20,18 @@ function walletResponse(result) {
 // separate concern from the 1v1 WebSocket protocol in
 // wsAdapter.js/socketHandlers.js, mounted under /api on the same Express app.
 // Every route requires a Firebase ID token (Authorization: Bearer ...).
-function createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore, dailyStore }) {
+// An ad claim racing the SSV callback for the same key can find it
+// mid-write ("in-progress"): give it a moment and ask again.
+async function retryInProgress(claim) {
+  let result = await claim();
+  for (let i = 0; i < 5 && result.error === 'in-progress'; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    result = await claim();
+  }
+  return result;
+}
+
+function createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore, dailyStore, iapStore }) {
   const router = express.Router();
   router.use(express.json());
   router.use(requireAuth);
@@ -28,7 +40,9 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
   async function profile(player, extra) {
     const { gems, hints } = await economyStore.ensureWallet(player.playerId);
     const loginGift = await economyStore.loginGift(player.playerId);
-    return { ...player, gems, hints, loginGift, ...extra, serverNow: Date.now(), config: clientConfig };
+    const adsToday = await economyStore.adsToday(player.playerId);
+    const store = await iapStore.status(player.playerId);
+    return { ...player, gems, hints, loginGift, adsToday, ...store, ...extra, serverNow: Date.now(), config: { ...clientConfig, monetization: monetizationOn() } };
   }
 
   // Called by the client on every launch once signed in: creates the player
@@ -52,6 +66,7 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
     if (!hasAdminCredentials()) return res.status(503).json({ error: 'deletion-unavailable' });
     const hadPlayer = await playerStore.deletePlayer(req.uid);
     await economyStore.anonymize(req.uid);
+    await iapStore.anonymize(req.uid);
     try {
       await deleteFirebaseUser(req.uid);
     } catch (err) {
@@ -73,6 +88,7 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
       return res.status(400).json({ error: 'invalid-guest-token' });
     }
     if (guestId === req.uid) return res.status(400).json({ error: 'same-account' });
+    await iapStore.mergePurchases(guestId, req.uid);
     const { player, merged } = await playerStore.mergeGuestInto(req.uid, guestId);
     res.json(await profile(player, { merged, isNew: false }));
   });
@@ -81,7 +97,8 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
   //   { item: 'continue', attemptId, puzzleId, index, key }  +30s on Time's Up (gems)
   //   { item: 'replay', puzzleId, key }                      History replay (gems)
   //   { item: 'hint', puzzleId, key }                        reveal one letter (1 hint)
-  //   { item: 'hint-pack', key }                             MORE HINTS (gems -> hints)
+  //   { item: 'hint-pack', key }                             MORE HINTS / Store (gems -> hints)
+  //   { item: 'hint-pack-10', key }                          Store (gems -> 10 hints)
   // key makes a retry idempotent (same key never charges twice). The client
   // applies the effect only after this succeeds.
   //   200 { gems, hints, price } | 402 { error: 'insufficient', short, gems, hints, price }
@@ -103,16 +120,79 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
     res.json(walletResponse(result));
   });
 
-  // MORE HINTS > WATCH AD finished: +1 hint, capped per day.
-  //   200 { gems, hints } | 429 { error: 'ad-cap', gems, hints }
+  // MORE HINTS > WATCH AD finished: +1 hint, capped per day. key is the
+  // custom_data the ad carried ("hint:<key>"); unless wait is false (test
+  // ad units, which never call SSV) the claim first waits for AdMob's SSV
+  // callback to grant it, then falls back to granting it unverified.
+  //   { key, wait }  ->  200 { gems, hints } | 429 { error: 'ad-cap', gems, hints }
   router.post('/economy/ad-hint', async (req, res) => {
     const key = req.body?.key;
     if (!ID_PATTERN.test(key || '')) return res.status(400).json({ error: 'invalid-claim' });
     await economyStore.ensureWallet(req.uid);
-    const result = await economyStore.claimAdHint(req.uid, key);
+    if (req.body?.wait !== false) await economyStore.waitForEntry(req.uid, `ad-hint:${key}`, AD_SSV_WAIT_MS);
+    const result = await retryInProgress(() => economyStore.claimAdHint(req.uid, key));
     if (result.error === 'ad-cap') return res.status(429).json(walletResponse(result));
     if (result.error) return res.status(409).json(walletResponse(result));
     res.json(walletResponse(result));
+  });
+
+  // Time's Up > WATCH AD finished: may this attempt take its +30s?
+  //   { attemptId, puzzleId }  ->  200 { gems, hints }
+  //   | 429 { error: 'ad-cap' }   today's ad continues are used up
+  //   | 409 { error: 'ad-used' }  not the attempt's first continue
+  router.post('/economy/ad-continue', async (req, res) => {
+    const { attemptId, puzzleId } = req.body || {};
+    if (!ID_PATTERN.test(attemptId || '') || (puzzleId && !ID_PATTERN.test(puzzleId))) {
+      return res.status(400).json({ error: 'invalid-claim' });
+    }
+    await economyStore.ensureWallet(req.uid);
+    const result = await retryInProgress(() => economyStore.claimAdContinue(req.uid, attemptId, puzzleId || undefined));
+    if (result.error === 'ad-cap') return res.status(429).json(walletResponse(result));
+    if (result.error) return res.status(409).json(walletResponse(result));
+    res.json(walletResponse(result));
+  });
+
+  // Store > FREE GEMS finished: same SSV-first claim as ad-hint ("gems:<key>").
+  //   { key, wait }  ->  200 { gems, hints } | 429 { error: 'ad-cap', gems, hints }
+  router.post('/economy/ad-gems', async (req, res) => {
+    const key = req.body?.key;
+    if (!ID_PATTERN.test(key || '')) return res.status(400).json({ error: 'invalid-claim' });
+    await economyStore.ensureWallet(req.uid);
+    if (req.body?.wait !== false) await economyStore.waitForEntry(req.uid, `ad-gems:${key}`, AD_SSV_WAIT_MS);
+    const result = await retryInProgress(() => economyStore.claimAdGems(req.uid, key));
+    if (result.error === 'ad-cap') return res.status(429).json(walletResponse(result));
+    if (result.error) return res.status(409).json(walletResponse(result));
+    res.json(walletResponse(result));
+  });
+
+  // ------------------------------------------------------------ Store
+
+  // A Google Play purchase to credit: { productId, token }. The client
+  // confirms (consumes/acknowledges) it with Play only after a 200.
+  //   200 { credited|pending, gems, hints, removeAds, starterAvailable, pass, iapAccountId }
+  //   400 { error: 'unknown-product' | 'invalid-token' | 'wrong-account' | 'canceled' | 'other-player' }
+  router.post('/iap/verify', async (req, res) => {
+    const { productId, token } = req.body || {};
+    if (!PRODUCT_PATTERN.test(productId || '') || typeof token !== 'string' || token.length < 8 || token.length > 512) {
+      return res.status(400).json({ error: 'invalid-purchase' });
+    }
+    await playerStore.getOrCreate(req.uid);
+    let result;
+    try {
+      result = await iapStore.verify(req.uid, { productId, token });
+    } catch (err) {
+      console.error('[iap] verify failed:', err.message);
+      return res.status(503).json({ error: 'verify-unavailable' }); // client retries later; purchase stays unconfirmed
+    }
+    res.status(result.error ? 400 : 200).json(result);
+  });
+
+  // Forest Pass daily bonus (once per UTC day while active).
+  //   200 { gems, hints, grant } | 409 { error: 'no-pass', gems, hints }
+  router.post('/pass/claim', async (req, res) => {
+    await economyStore.ensureWallet(req.uid);
+    const result = await iapStore.claimPass(req.uid);
+    res.status(result.error ? 409 : 200).json({ gems: result.gems, hints: result.hints, grant: result.grant || {}, ...(result.error ? { error: result.error } : {}) });
   });
 
   // ------------------------------------------------------- Login Gift

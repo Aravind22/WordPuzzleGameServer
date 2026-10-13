@@ -31,6 +31,19 @@ class PlayerStore {
     return { playerId: doc._id, name: doc.name, trophies, arena: arenaForTrophies(trophies) };
   }
 
+  // Read-only: how many of playerIds sit in each arena, as { [arena]: count }.
+  // Ids with no player doc are skipped. Used by the processDef dashboard.
+  async countByArena(playerIds) {
+    const counts = {};
+    if (playerIds.length === 0) return counts;
+    const docs = await this.collection.find({ _id: { $in: playerIds } }, { projection: { trophies: 1 } }).toArray();
+    for (const doc of docs) {
+      const arena = arenaForTrophies(doc.trophies || 0);
+      counts[arena] = (counts[arena] || 0) + 1;
+    }
+    return counts;
+  }
+
   // Returns { player, isNew }; creates the player on first sight and bumps
   // lastSeenAt either way.
   async getOrCreate(playerId) {

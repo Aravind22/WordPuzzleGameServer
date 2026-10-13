@@ -9,6 +9,7 @@ const { registerSocketHandlers } = require('./net/socketHandlers');
 const { createApiRouter } = require('./net/apiRoutes');
 const { createAdsRouter } = require('./net/adsRoutes');
 const { createIapRouter } = require('./net/iapRoutes');
+const { createProcessDefRouter } = require('./net/processDefRoutes');
 const PuzzleShareStore = require('./game/PuzzleShareStore');
 const StatsStore = require('./game/StatsStore');
 const PlayerStore = require('./game/PlayerStore');
@@ -39,6 +40,13 @@ async function main() {
   if (process.env.IAP_ALLOW_FAKE === 'true') console.warn('[iap] IAP_ALLOW_FAKE=true: fake purchase tokens accepted (local testing only!)');
 
   const app = express();
+  // Reverse-proxy hops in front of Node (e.g. 1 for nginx), so req.ip and
+  // req.secure reflect the real client. processDef needs it for HTTPS-only
+  // access and per-IP lockout.
+  if (process.env.TRUST_PROXY) {
+    const hops = Number(process.env.TRUST_PROXY);
+    app.set('trust proxy', Number.isInteger(hops) ? hops : process.env.TRUST_PROXY);
+  }
   const server = http.createServer(app);
   const io = attachWsServer(server, { playerStore });
 
@@ -68,6 +76,10 @@ async function main() {
 
   const roomManager = new RoomManager();
   registerSocketHandlers(io, roomManager, playerStore, economyStore);
+
+  // Private metrics dashboard; not mounted at all without PROCESS_DEF_PASSWORD.
+  const processDefRouter = createProcessDefRouter({ io, roomManager, playerStore, db });
+  if (processDefRouter) app.use('/processDef', processDefRouter);
 
   server.listen(PORT, () => {
     console.log(`Server up and running on port:${PORT}`);

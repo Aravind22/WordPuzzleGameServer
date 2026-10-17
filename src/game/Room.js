@@ -40,7 +40,7 @@ class Room {
   constructor(id, mode = 'unranked') {
     this.id = id;
     this.mode = mode; // 'ranked' (Quick Match) | 'unranked' (Create/Join Room) -- trophies only apply to 'ranked'
-    this.players = []; // { playerId, socketId, name, trophies, foundWords: [], connected }
+    this.players = []; // { playerId, socketId, name, avatar, trophies, foundWords: [], connected }
     this.grid = null;
     this.gridSize = GRID_SIZE;
     this.placedWords = []; // [{ word, cells }]
@@ -77,8 +77,8 @@ class Room {
 
   // trophies is only known for ranked (Quick Match) players; private rooms
   // don't show it, so it stays 0 there.
-  addPlayer({ playerId, socketId, name, trophies = 0 }) {
-    const player = { playerId, socketId, name, trophies, foundWords: [], connected: true };
+  addPlayer({ playerId, socketId, name, avatar = 0, trophies = 0 }) {
+    const player = { playerId, socketId, name, avatar, trophies, foundWords: [], connected: true };
     this.players.push(player);
     this.touch();
     return player;

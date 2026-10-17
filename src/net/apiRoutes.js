@@ -55,9 +55,11 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
     res.json(await profile(player, { isNew }));
   });
 
+  // { name?, avatar? } (avatar 1..15). 400 invalid-name / invalid-avatar.
   router.patch('/me', async (req, res) => {
-    const player = await playerStore.setName(req.uid, req.body?.name);
-    if (!player) return res.status(400).json({ error: 'invalid-name' });
+    const { name, avatar } = req.body || {};
+    const player = await playerStore.setProfile(req.uid, { name, avatar });
+    if (!player) return res.status(400).json({ error: name === undefined && avatar !== undefined ? 'invalid-avatar' : 'invalid-name' });
     res.json(await profile(player, { isNew: false }));
   });
 

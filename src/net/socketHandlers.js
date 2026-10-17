@@ -10,7 +10,7 @@ function matchStartPayload(room) {
     grid: room.grid,
     gridSize: room.gridSize,
     words: room.placedWords.map((p) => p.word),
-    players: room.players.map((p) => ({ playerId: p.playerId, name: p.name, trophies: p.trophies || 0 })),
+    players: room.players.map((p) => ({ playerId: p.playerId, name: p.name, avatar: p.avatar || 0, trophies: p.trophies || 0 })),
   };
 }
 
@@ -80,21 +80,21 @@ function handleRematch(socket, roomManager, io) {
 }
 
 function handleCreateRoom(socket, roomManager, io) {
-  const { playerId, name } = socket.data;
+  const { playerId, name, avatar } = socket.data;
   withdrawRematch(io, roomManager, playerId);
-  const room = roomManager.createRoom({ playerId, socketId: socket.id, name }, 'unranked');
+  const room = roomManager.createRoom({ playerId, socketId: socket.id, name, avatar }, 'unranked');
   logSocket('createRoom %s (%s) -> room %s', playerId, name, room.id);
   socket.join(room.id);
   socket.emit('roomCreated', { code: room.id });
 }
 
 function handleJoinRoom(socket, roomManager, io, code) {
-  const { playerId, name } = socket.data;
+  const { playerId, name, avatar } = socket.data;
   logSocket('joinRoom %s (%s) -> %s', playerId, name, code);
   if (!code) return socket.emit('errorMsg', { code: 'invalid-request' });
   withdrawRematch(io, roomManager, playerId);
 
-  const result = roomManager.joinRoom(String(code).toUpperCase(), { playerId, socketId: socket.id, name });
+  const result = roomManager.joinRoom(String(code).toUpperCase(), { playerId, socketId: socket.id, name, avatar });
   if (result.error) {
     console.warn(`[socket] joinRoom ${playerId} failed to join ${code}: ${result.error}`);
     return socket.emit('errorMsg', { code: result.error });
@@ -105,8 +105,8 @@ function handleJoinRoom(socket, roomManager, io, code) {
   socket.join(room.id);
 
   const opponent = room.otherPlayer(playerId);
-  if (opponent) io.to(opponent.socketId).emit('opponentJoined', { opponentName: name });
-  socket.emit('opponentJoined', { opponentName: opponent ? opponent.name : undefined });
+  if (opponent) io.to(opponent.socketId).emit('opponentJoined', { opponentName: name, opponentAvatar: avatar || 0 });
+  socket.emit('opponentJoined', { opponentName: opponent ? opponent.name : undefined, opponentAvatar: opponent ? opponent.avatar || 0 : 0 });
 
   emitMatchStart(io, room);
 }
@@ -117,13 +117,14 @@ async function handleFindMatch(socket, roomManager, io, playerStore) {
   withdrawRematch(io, roomManager, playerId);
   let arena;
   let trophies;
+  let avatar;
   try {
-    ({ player: { arena, trophies } } = await playerStore.getOrCreate(playerId));
+    ({ player: { arena, trophies, avatar } } = await playerStore.getOrCreate(playerId));
   } catch (err) {
     console.error(`[mm] findMatch ${playerId} playerStore.getOrCreate failed:`, err);
     return socket.emit('errorMsg', { code: 'find-match-failed' });
   }
-  roomManager.queueForMatch({ playerId, socketId: socket.id, name, arena, trophies });
+  roomManager.queueForMatch({ playerId, socketId: socket.id, name, avatar, arena, trophies });
   logMm('findMatch %s queued arena=%s queueLength=%d', playerId, arena, roomManager.queue.length);
   // Pairing (and matchStart emission) happens asynchronously on the
   // matchmaker's next tick, via the onRoomReady callback registered in
@@ -258,8 +259,8 @@ function handleRoomReady(io, room) {
   }
 
   const [a, b] = room.players;
-  io.to(a.socketId).emit('opponentJoined', { opponentName: b.name });
-  io.to(b.socketId).emit('opponentJoined', { opponentName: a.name });
+  io.to(a.socketId).emit('opponentJoined', { opponentName: b.name, opponentAvatar: b.avatar || 0 });
+  io.to(b.socketId).emit('opponentJoined', { opponentName: a.name, opponentAvatar: a.avatar || 0 });
 
   emitMatchStart(io, room);
 }

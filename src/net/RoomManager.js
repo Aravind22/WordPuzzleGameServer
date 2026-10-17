@@ -48,23 +48,23 @@ class RoomManager {
     return code;
   }
 
-  createRoom({ playerId, socketId, name, trophies }, mode = 'unranked') {
+  createRoom({ playerId, socketId, name, avatar, trophies }, mode = 'unranked') {
     const code = this._newRoomCode();
     const room = new Room(code, mode);
-    room.addPlayer({ playerId, socketId, name, trophies });
+    room.addPlayer({ playerId, socketId, name, avatar, trophies });
     this.rooms.set(code, room);
     this.playerToRoom.set(playerId, code);
     return room;
   }
 
   // Returns { room } on success, or { error: 'room-not-found' | 'room-full' | 'already-started' }.
-  joinRoom(code, { playerId, socketId, name }) {
+  joinRoom(code, { playerId, socketId, name, avatar }) {
     const room = this.rooms.get(code);
     if (!room) return { error: 'room-not-found' };
     if (room.hasStarted()) return { error: 'already-started' };
     if (room.isFull()) return { error: 'room-full' };
 
-    room.addPlayer({ playerId, socketId, name });
+    room.addPlayer({ playerId, socketId, name, avatar });
     this.playerToRoom.set(playerId, code);
     room.start();
     return { room };
@@ -73,9 +73,9 @@ class RoomManager {
   // Queues playerId for ranked Quick Match. Pairing happens on the next
   // matchmakerTick(), not synchronously -- arena-aware matching needs to
   // look across everyone currently waiting, not just the two most recent.
-  queueForMatch({ playerId, socketId, name, arena, trophies }) {
+  queueForMatch({ playerId, socketId, name, avatar, arena, trophies }) {
     this.queue = this.queue.filter((q) => q.playerId !== playerId);
-    this.queue.push({ playerId, socketId, name, arena, trophies, queuedAt: Date.now() });
+    this.queue.push({ playerId, socketId, name, avatar, arena, trophies, queuedAt: Date.now() });
     logMm('queue += %s (arena=%s) -> [%s]', playerId, arena, this.queue.map((q) => `${q.playerId}/${q.arena}`).join(', '));
   }
 
@@ -149,7 +149,7 @@ class RoomManager {
   openRematch(room, onExpire) {
     const record = {
       id: room.id,
-      players: room.players.map((p) => ({ playerId: p.playerId, socketId: p.socketId, name: p.name })),
+      players: room.players.map((p) => ({ playerId: p.playerId, socketId: p.socketId, name: p.name, avatar: p.avatar })),
       ready: new Set(),
       timer: null,
     };

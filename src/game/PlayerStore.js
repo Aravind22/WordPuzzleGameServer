@@ -5,9 +5,11 @@ const COLLECTION = 'players';
 const WIN_GAIN = 30;
 const LOSS_DEDUCTION = 15;
 const NAME_MAX_LENGTH = 20;
+// Profile pictures 1..AVATAR_COUNT (client: PlayerAvatars, Art/ForestUI/avatars).
+const AVATAR_COUNT = 15;
 
 // One document per player, keyed by Firebase uid. Holds the server-owned
-// profile (display name) and ranked trophies; economy fields join later.
+// profile (display name, avatar) and ranked trophies; economy fields join later.
 class PlayerStore {
   constructor(db) {
     this.collection = db.collection(COLLECTION);
@@ -15,6 +17,19 @@ class PlayerStore {
 
   static defaultName(playerId) {
     return `PLAYER-${playerId.slice(-4).toUpperCase()}`;
+  }
+
+  // Until a player picks one: spread over the set by id, so new players
+  // don't all share the same picture.
+  static defaultAvatar(playerId) {
+    let hash = 0;
+    for (const ch of String(playerId)) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+    return (hash % AVATAR_COUNT) + 1;
+  }
+
+  // 1..AVATAR_COUNT, or null if invalid.
+  static cleanAvatar(avatar) {
+    return Number.isInteger(avatar) && avatar >= 1 && avatar <= AVATAR_COUNT ? avatar : null;
   }
 
   // Trims, collapses inner whitespace, and enforces 1..NAME_MAX_LENGTH
@@ -29,7 +44,8 @@ class PlayerStore {
 
   static toPlayer(doc) {
     const trophies = doc.trophies || 0;
-    return { playerId: doc._id, name: doc.name, trophies, arena: arenaForTrophies(trophies) };
+    const avatar = PlayerStore.cleanAvatar(doc.avatar) || PlayerStore.defaultAvatar(doc._id);
+    return { playerId: doc._id, name: doc.name, avatar, trophies, arena: arenaForTrophies(trophies) };
   }
 
   // Read-only: how many of playerIds sit in each arena, as { [arena]: count }.
@@ -62,12 +78,27 @@ class PlayerStore {
 
   // Returns the updated player, or null if the name is invalid.
   async setName(playerId, name) {
-    const cleaned = PlayerStore.cleanName(name);
-    if (!cleaned) return null;
+    return this.setProfile(playerId, { name });
+  }
+
+  // PATCH /me: name and/or avatar (an undefined field is left alone).
+  // Returns the updated player, or null if a given field is invalid or
+  // neither is given.
+  async setProfile(playerId, { name, avatar }) {
+    const changes = {};
+    if (name !== undefined) {
+      changes.name = PlayerStore.cleanName(name);
+      if (!changes.name) return null;
+    }
+    if (avatar !== undefined) {
+      changes.avatar = PlayerStore.cleanAvatar(avatar);
+      if (!changes.avatar) return null;
+    }
+    if (Object.keys(changes).length === 0) return null;
     await this.getOrCreate(playerId);
     const doc = await this.collection.findOneAndUpdate(
       { _id: playerId },
-      { $set: { name: cleaned } },
+      { $set: changes },
       { returnDocument: 'after' }
     );
     return PlayerStore.toPlayer(doc);

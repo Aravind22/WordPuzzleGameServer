@@ -152,7 +152,7 @@ function attachWsServer(server, { playerStore }) {
   });
 
   wss.on('connection', (ws, req) => {
-    const { playerId, name } = req.player;
+    const { playerId, name, avatar } = req.player;
 
     const socket = new SocketFacade(ws, io);
     io._socketsById.set(socket.id, socket);
@@ -162,6 +162,7 @@ function attachWsServer(server, { playerStore }) {
 
     socket.data.playerId = playerId;
     socket.data.name = name;
+    socket.data.avatar = avatar;
 
     io.emit('connection', socket);
   });

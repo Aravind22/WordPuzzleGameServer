@@ -8,6 +8,7 @@ const prizeList = () => (monetizationOn() ? ALL_PRIZES : []);
 const streakBonus = (count) => (monetizationOn() ? bonusFor(count) : 0);
 const PRIZE_SLOTS = ALL_PRIZES.length;
 const { DAY_MS, utcDay, dayStartMs, nextResetMs, previousDay } = require('./utcDay');
+const PlayerStore = require('./PlayerStore');
 
 const GRID_SIZE = 10;
 const WORDS_PER_PUZZLE = 8;
@@ -44,7 +45,7 @@ function isStraightLine(cells) {
 // board closes and the top 3 are paid through the economy ledger.
 //
 //   daily_puzzles  { _id: day, gridSize, grid, words, placements, createdAt }
-//   daily_attempts { _id: day:playerId, day, playerId, name, startedAt,
+//   daily_attempts { _id: day:playerId, day, playerId, name, avatar, startedAt,
 //                    found: { WORD: ms }, solvedAt?, timeMs?, void?,
 //                    rank?, prize?, prizeSeen? }
 //   (void = solved faster than DAILY_MIN_MS: kept, but never ranked or paid)
@@ -239,7 +240,7 @@ class DailyStore {
     const isVoid = timeMs < DAILY_MIN_MS;
     const finished = await this.attempts.updateOne(
       { _id: id, solvedAt: { $exists: false } },
-      { $set: { solvedAt: finishedAt, timeMs, name: player.name, ...(isVoid ? { void: true } : {}) } }
+      { $set: { solvedAt: finishedAt, timeMs, name: player.name, avatar: player.avatar, ...(isVoid ? { void: true } : {}) } }
     );
     // Only the request that finished the attempt moves the streak.
     let streak = null;
@@ -284,7 +285,7 @@ class DailyStore {
       serverNow: now,
       players: await this.attempts.countDocuments(solvedFilter),
       prizes: prizeList(),
-      rows: top.map((a, i) => ({ rank: i + 1, name: a.name || 'PLAYER', timeMs: a.timeMs, prize: prizeList()[i] || 0, me: a.playerId === playerId })),
+      rows: top.map((a, i) => ({ rank: i + 1, name: a.name || 'PLAYER', avatar: a.avatar || PlayerStore.defaultAvatar(a.playerId), timeMs: a.timeMs, prize: prizeList()[i] || 0, me: a.playerId === playerId })),
       me: mine ? { rank: await this.rankOf(mine), timeMs: mine.timeMs } : null,
     };
   }

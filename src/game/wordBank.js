@@ -1,58 +1,31 @@
-// Port of Assets/Scripts/WordSearch/WordBank.cs — keep in sync with that file.
-const WORDS = [
-  // Animals
-  'CAT', 'DOG', 'LION', 'TIGER', 'BEAR', 'WOLF', 'EAGLE', 'HAWK', 'SHARK', 'WHALE',
-  'DOLPHIN', 'ZEBRA', 'GIRAFFE', 'MONKEY', 'RABBIT', 'FOX', 'DEER', 'MOUSE', 'HORSE', 'SNAKE',
-  'LIZARD', 'TURTLE', 'FROG', 'OWL', 'PANDA', 'KOALA', 'CAMEL', 'GOAT', 'SHEEP', 'OTTER',
-  'CRAB', 'SQUID', 'OCTOPUS', 'PARROT', 'FALCON', 'BEAVER', 'PENGUIN', 'WALRUS', 'SEAL', 'STINGRAY',
-  'JELLYFISH', 'LOBSTER', 'OYSTER', 'STARFISH', 'SEAHORSE',
+// Loads wordBank.txt, an identical copy of the Unity client's
+// Assets/Resources/WordBank.txt (see the format notes at its top) --
+// keep the two files in sync.
+const fs = require('fs');
+const path = require('path');
 
-  // Nature
-  'TREE', 'RIVER', 'MOUNTAIN', 'OCEAN', 'FOREST', 'DESERT', 'VALLEY', 'ISLAND', 'CANYON', 'GLACIER',
-  'VOLCANO', 'MEADOW', 'JUNGLE', 'PRAIRIE', 'WATERFALL', 'CLIFF', 'CORAL', 'REEF', 'STORM', 'THUNDER',
-  'LIGHTNING', 'RAINBOW', 'CLOUD', 'BREEZE', 'TORNADO',
+const MIN_LENGTH = 3;
+const MAX_LENGTH = 9; // grid is 10x10; one cell of slack keeps placement easy
 
-  // Sky and space
-  'SUNRISE', 'SUNSET', 'HORIZON', 'ECLIPSE', 'PLANET', 'GALAXY', 'COMET', 'METEOR', 'STAR', 'MOON',
-  'ORBIT', 'GRAVITY', 'NEBULA', 'ASTEROID', 'TELESCOPE', 'ROCKET', 'SATELLITE', 'ASTRONAUT', 'UNIVERSE', 'COSMOS',
+function parse(text) {
+  const words = [];
+  const seen = new Set();
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('//') || line.startsWith('#')) continue;
+    const word = line.split('|')[0].trim().toUpperCase(); // "WORD | meaning" -- meaning reserved for later
+    if (word.length < MIN_LENGTH || word.length > MAX_LENGTH || !/^[A-Z]+$/.test(word)) {
+      console.warn(`wordBank: skipping invalid word '${word}'`);
+      continue;
+    }
+    if (!seen.has(word)) {
+      seen.add(word);
+      words.push(word);
+    }
+  }
+  return words;
+}
 
-  // Food
-  'PIZZA', 'BURGER', 'PASTA', 'SALAD', 'BREAD', 'CHEESE', 'APPLE', 'BANANA', 'ORANGE', 'GRAPE',
-  'MANGO', 'LEMON', 'CHERRY', 'PEACH', 'MELON', 'POTATO', 'CARROT', 'ONION', 'GARLIC', 'PEPPER',
-  'TOMATO', 'CUCUMBER', 'SPINACH', 'BROCCOLI', 'COOKIE', 'CAKE', 'CANDY', 'HONEY', 'SYRUP', 'YOGURT',
+const WORDS = parse(fs.readFileSync(path.join(__dirname, 'wordBank.txt'), 'utf8'));
 
-  // Technology
-  'COMPUTER', 'LAPTOP', 'PHONE', 'TABLET', 'ROBOT', 'INTERNET', 'NETWORK', 'SOFTWARE', 'HARDWARE', 'KEYBOARD',
-  'MONITOR', 'PRINTER', 'CAMERA', 'SPEAKER', 'BATTERY', 'CIRCUIT', 'SENSOR', 'ANTENNA', 'BROWSER', 'WEBSITE',
-
-  // Sports
-  'SOCCER', 'TENNIS', 'HOCKEY', 'BOXING', 'GOLF', 'RUGBY', 'CRICKET', 'SWIMMING', 'RUNNING', 'CYCLING',
-  'SKATING', 'SKIING', 'SURFING', 'ROWING', 'ARCHERY', 'FENCING', 'WRESTLING', 'BOWLING', 'DARTS', 'CHESS',
-  'MARATHON', 'STADIUM', 'REFEREE', 'WHISTLE', 'TROPHY',
-
-  // Colors and shapes
-  'CRIMSON', 'AMBER', 'IVORY', 'SCARLET', 'MAROON', 'TEAL', 'CIRCLE', 'SQUARE', 'TRIANGLE', 'RECTANGLE',
-  'OVAL', 'DIAMOND', 'HEXAGON', 'CUBE', 'SPHERE', 'CYLINDER', 'PENTAGON', 'OCTAGON', 'SPIRAL', 'PRISM',
-
-  // Music
-  'GUITAR', 'PIANO', 'VIOLIN', 'DRUMS', 'FLUTE', 'TRUMPET', 'CELLO', 'HARP', 'ORGAN', 'CLARINET',
-  'MELODY', 'RHYTHM', 'CHORUS', 'ANTHEM', 'BALLAD',
-
-  // Household
-  'CHAIR', 'TABLE', 'SOFA', 'LAMP', 'MIRROR', 'PILLOW', 'BLANKET', 'CURTAIN', 'CARPET', 'CABINET',
-  'DRAWER', 'SHELF', 'CLOCK', 'CANDLE', 'BASKET', 'LADDER', 'HAMMER', 'WRENCH', 'SCISSORS', 'BUCKET',
-
-  // Jobs
-  'DOCTOR', 'TEACHER', 'FARMER', 'PILOT', 'SAILOR', 'ARTIST', 'WRITER', 'DANCER', 'SINGER', 'LAWYER',
-  'NURSE', 'DENTIST', 'PLUMBER', 'BAKER', 'BUTCHER', 'TAILOR', 'PAINTER', 'MECHANIC', 'ENGINEER', 'SCIENTIST',
-
-  // Science
-  'ATOM', 'MOLECULE', 'ELEMENT', 'ENERGY', 'MAGNET', 'CRYSTAL', 'MINERAL', 'FOSSIL', 'VIRUS', 'BACTERIA',
-  'VACCINE', 'OXYGEN', 'HYDROGEN', 'CARBON', 'PROTON', 'NEURON', 'ENZYME', 'HORMONE', 'VITAMIN', 'PROTEIN',
-
-  // Travel and places
-  'AIRPORT', 'HARBOR', 'STATION', 'BRIDGE', 'TUNNEL', 'HIGHWAY', 'VILLAGE', 'CASTLE', 'PALACE', 'TEMPLE',
-  'MUSEUM', 'LIBRARY', 'MARKET', 'GARDEN', 'PARK', 'PLAZA', 'FOUNTAIN', 'MONUMENT', 'LIGHTHOUSE', 'COMPASS',
-];
-
-module.exports = { WORDS };
+module.exports = { WORDS, MIN_LENGTH, MAX_LENGTH };

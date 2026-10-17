@@ -7,8 +7,8 @@ const WORDS_PER_PUZZLE = 8;
 const DISCONNECT_GRACE_MS = Number(process.env.DISCONNECT_GRACE_MS) || 20 * 1000;
 const ABANDONED_WAITING_MS = 5 * 60 * 1000;
 
-// Shared across all rooms so the cooldown (avoid repeating recent puzzles)
-// applies server-wide, same spirit as the single-player WordPicker instance.
+// Shared across all rooms so the word rotation (every word once before any
+// repeats) applies server-wide, same as the single-player WordPicker.
 const sharedWordPicker = new WordPicker(WORDS);
 
 function majorityThreshold(totalWords) {

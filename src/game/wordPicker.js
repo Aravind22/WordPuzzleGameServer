@@ -1,6 +1,8 @@
-// Port of Assets/Scripts/WordSearch/WordPicker.cs
-// Picks N words per puzzle, avoiding repeats from the last COOLDOWN_PUZZLES puzzles.
-const COOLDOWN_PUZZLES = 5;
+// Port of Assets/Scripts/WordSearch/WordPicker.cs.
+// Deals words from a shuffled deck of the whole bank, so every word comes up
+// once before any word repeats; when the deck runs out it is reshuffled (the
+// previous puzzle's words go to the back). In memory only: a restart starts
+// a fresh deck.
 
 function shuffle(list) {
   for (let i = list.length - 1; i > 0; i--) {
@@ -11,35 +13,32 @@ function shuffle(list) {
 
 class WordPicker {
   constructor(wordPool) {
-    this._pool = [...wordPool];
-    this._history = []; // oldest first
+    this._pool = [...new Set(wordPool)];
+    this._deck = [];
+    this._lastPicked = [];
   }
 
   pick(count) {
-    const recentlyUsed = new Set();
-    for (const used of this._history) {
-      for (const w of used) recentlyUsed.add(w);
+    const picked = [];
+    count = Math.min(count, this._pool.length);
+    while (picked.length < count) {
+      if (this._deck.length === 0) this._reshuffle(picked);
+      const word = this._deck.shift();
+      if (!picked.includes(word)) picked.push(word);
     }
+    this._lastPicked = picked;
+    return [...picked];
+  }
 
-    let available = this._pool.filter((w) => !recentlyUsed.has(w));
-
-    // Safety net: only reachable if the pool is too small relative to
-    // count/cooldown to keep enough words free. Falls back to ignoring
-    // the cooldown rather than generating a puzzle with fewer words
-    // than requested.
-    if (available.length < count) {
-      available = [...this._pool];
-    }
-
-    shuffle(available);
-    const picked = available.slice(0, count);
-
-    this._history.push(picked);
-    if (this._history.length > COOLDOWN_PUZZLES) {
-      this._history.shift();
-    }
-
-    return picked;
+  // New cycle: the whole bank in a new order, with the words of the last
+  // puzzle and of the one being built kept to the back.
+  _reshuffle(picking) {
+    const recent = new Set([...this._lastPicked, ...picking]);
+    const front = this._pool.filter((w) => !recent.has(w));
+    const back = this._pool.filter((w) => recent.has(w));
+    shuffle(front);
+    shuffle(back);
+    this._deck = [...front, ...back];
   }
 }
 

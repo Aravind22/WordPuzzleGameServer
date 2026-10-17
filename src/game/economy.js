@@ -11,6 +11,11 @@ function monetizationOn() {
 const STARTER_GEMS = 100;
 const STARTER_HINTS = 3;
 
+// Finishing the first-launch tutorial: hints, once per player ever
+// (EconomyStore.claimTutorialReward). Granted whether or not monetization
+// is on -- with it off, the client keeps them in its own ad-hint stock.
+const TUTORIAL_HINTS = 3;
+
 // +30s continue on Time's Up, per puzzle attempt: 1st, 2nd, 3rd and later.
 // The 1st can also be paid with a rewarded ad, which still counts toward
 // the escalation.
@@ -109,6 +114,6 @@ const clientConfig = {
 };
 
 module.exports = {
-  STARTER_GEMS, STARTER_HINTS, CONTINUE_PRICES, REPLAY_PRICE, HINT_PACK, HINT_PACK_10, AD_HINTS_PER_DAY, AD_GEMS, AD_GEMS_PER_DAY, PRODUCTS, PASS_DAILY, AD_CONTINUES_PER_DAY, AD_SSV_WAIT_MS, ARENA_HINTS,
+  STARTER_GEMS, STARTER_HINTS, TUTORIAL_HINTS, CONTINUE_PRICES, REPLAY_PRICE, HINT_PACK, HINT_PACK_10, AD_HINTS_PER_DAY, AD_GEMS, AD_GEMS_PER_DAY, PRODUCTS, PASS_DAILY, AD_CONTINUES_PER_DAY, AD_SSV_WAIT_MS, ARENA_HINTS,
   monetizationOn, DAILY_PRIZES, DAILY_MIN_MS, LOGIN_GIFTS, STREAK_BONUSES, STREAK_REPEAT, continuePrice, streakBonus, clientConfig,
 };

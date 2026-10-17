@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { arenaForTrophies } = require('./arena');
 const {
-  STARTER_GEMS, STARTER_HINTS, REPLAY_PRICE, HINT_PACK, HINT_PACK_10, AD_HINTS_PER_DAY, AD_GEMS, AD_GEMS_PER_DAY, AD_CONTINUES_PER_DAY, ARENA_HINTS, LOGIN_GIFTS, continuePrice, monetizationOn,
+  STARTER_GEMS, STARTER_HINTS, TUTORIAL_HINTS, REPLAY_PRICE, HINT_PACK, HINT_PACK_10, AD_HINTS_PER_DAY, AD_GEMS, AD_GEMS_PER_DAY, AD_CONTINUES_PER_DAY, ARENA_HINTS, LOGIN_GIFTS, continuePrice, monetizationOn,
 } = require('./economy');
 const { utcDay, previousDay } = require('./utcDay');
 
@@ -284,6 +284,52 @@ class EconomyStore {
       await this.ledger.updateOne({ playerId, key: `ad-continue:${id}` }, { $set: { 'context.verified': true } });
     }
     return true;
+  }
+
+  // First-launch tutorial finished: TUTORIAL_HINTS, once per player ever.
+  // The ledger's unique (playerId, key) entry is the lock, so retries and
+  // races can't grant twice. With monetization on the hints go into the
+  // wallet; with it off the client keeps them in its own ad-hint stock and
+  // the entry only records the grant. claimKey is the client's id for its
+  // one claim: asking again with the same key (its first answer got lost)
+  // gets the grant again, any other key gets granted: false.
+  // Returns { granted, hints }.
+  async claimTutorialReward(playerId, claimKey) {
+    const key = 'tutorial:reward';
+    const wallet = monetizationOn();
+    try {
+      await this.ledger.insertOne({
+        playerId, key, delta: wallet ? { hints: TUTORIAL_HINTS } : {}, reason: 'tutorial',
+        context: { hints: TUTORIAL_HINTS, wallet, claimKey }, status: 'pending', at: Date.now(),
+      });
+    } catch (err) {
+      if (err.code !== 11000) throw err;
+      const prior = await this.ledger.findOne({ playerId, key });
+      const resend = !!claimKey && prior?.context?.claimKey === claimKey && prior.status === 'done';
+      return { granted: resend, hints: TUTORIAL_HINTS };
+    }
+    if (wallet) {
+      await this.ensureWallet(playerId); // starter hints before the $inc creates the field
+      await this.players.updateOne({ _id: playerId }, { $inc: { hints: TUTORIAL_HINTS } });
+    }
+    await this.ledger.updateOne({ playerId, key }, { $set: { status: 'done' } });
+    return { granted: true, hints: TUTORIAL_HINTS };
+  }
+
+  // Guest folded into a saved account: if the guest already took the
+  // tutorial reward, the saved account counts as having taken it too, so
+  // the same person can't claim it again on that account.
+  async carryTutorialClaim(guestId, targetId) {
+    const claimed = await this.ledger.findOne({ playerId: guestId, key: 'tutorial:reward' });
+    if (!claimed) return;
+    try {
+      await this.ledger.insertOne({
+        playerId: targetId, key: 'tutorial:reward', delta: {}, reason: 'tutorial',
+        context: { carriedFrom: guestId }, status: 'done', at: Date.now(),
+      });
+    } catch (err) {
+      if (err.code !== 11000) throw err; // the saved account already had it
+    }
   }
 
   // Account deletion: the ledger is kept for fraud/tax records, but no

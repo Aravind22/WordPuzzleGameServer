@@ -24,11 +24,9 @@ function isStraightLine(cells) {
   if (cells.length < 2) return false;
   const rowDelta = cells[1].row - cells[0].row;
   const colDelta = cells[1].col - cells[0].col;
-  // Only horizontal or vertical, one cell step at a time (matches
-  // gridGenerator's placement directions).
-  const isHorizontal = rowDelta === 0 && (colDelta === 1 || colDelta === -1);
-  const isVertical = colDelta === 0 && (rowDelta === 1 || rowDelta === -1);
-  if (!isHorizontal && !isVertical) return false;
+  // Horizontal, vertical or diagonal, one cell step at a time (matches
+  // gridGenerator's placement directions, either way round).
+  if (Math.abs(rowDelta) > 1 || Math.abs(colDelta) > 1 || (rowDelta === 0 && colDelta === 0)) return false;
 
   for (let i = 1; i < cells.length; i++) {
     const dr = cells[i].row - cells[i - 1].row;

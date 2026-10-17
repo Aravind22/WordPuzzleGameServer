@@ -89,8 +89,22 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
     }
     if (guestId === req.uid) return res.status(400).json({ error: 'same-account' });
     await iapStore.mergePurchases(guestId, req.uid);
+    await economyStore.carryTutorialClaim(guestId, req.uid);
     const { player, merged } = await playerStore.mergeGuestInto(req.uid, guestId);
     res.json(await profile(player, { merged, isNew: false }));
+  });
+
+  // First-launch tutorial finished: its hint reward, once per player ever.
+  //   { key }  the client's id for its claim (a retry after a lost answer
+  //            sends the same key and gets the same grant)
+  //   200 { granted: true, hints }   first claim (or its retry)
+  //   200 { granted: false, hints }  already claimed (another device or
+  //                                  claim, or a merged guest that had it)
+  router.post('/rewards/tutorial', async (req, res) => {
+    const key = req.body?.key;
+    if (!ID_PATTERN.test(key || '')) return res.status(400).json({ error: 'invalid-claim' });
+    await playerStore.getOrCreate(req.uid);
+    res.json(await economyStore.claimTutorialReward(req.uid, key));
   });
 
   // Spends on one use of a powerup, priced by the server:

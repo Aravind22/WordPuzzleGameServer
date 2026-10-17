@@ -1,9 +1,10 @@
 // Port of Assets/Scripts/WordSearch/WordSearchGenerator.cs
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-const MAX_ATTEMPTS = 100;
 const DIRECTIONS = [
   { row: 0, col: 1 }, // horizontal
   { row: 1, col: 0 }, // vertical
+  { row: 1, col: 1 }, // diagonal down-right
+  { row: -1, col: 1 }, // diagonal up-right
 ];
 
 function coordToIndex(row, col, gridSize) {
@@ -38,8 +39,13 @@ function fitsWithoutConflict(word, cells, grid, gridSize) {
   return true;
 }
 
-function canPlace(word, cells, grid, gridSize) {
-  return fitsInBounds(cells, gridSize) && fitsWithoutConflict(word, cells, grid, gridSize);
+// Letters the word would share with words already on the grid, or -1 when
+// it can't go there. A spot made only of existing letters is refused: the
+// word would hide entirely inside others.
+function overlapAt(word, cells, grid, gridSize) {
+  if (!fitsInBounds(cells, gridSize) || !fitsWithoutConflict(word, cells, grid, gridSize)) return -1;
+  const shared = cells.filter((c) => grid[coordToIndex(c.row, c.col, gridSize)] !== '.').length;
+  return shared === word.length ? -1 : shared;
 }
 
 function placeWordAt(word, cells, grid, gridSize) {
@@ -48,20 +54,34 @@ function placeWordAt(word, cells, grid, gridSize) {
   }
 }
 
+// Tries every start + direction and keeps the spots that share the most
+// letters with placed words (ties: random), so words connect whenever they
+// can.
 function tryPlaceWord(word, grid, gridSize, placedWords) {
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const direction = DIRECTIONS[randomInt(DIRECTIONS.length)];
-    const startRow = randomInt(gridSize);
-    const startCol = randomInt(gridSize);
-    const cells = getWordCells(word, startRow, startCol, direction);
-    if (canPlace(word, cells, grid, gridSize)) {
-      placeWordAt(word, cells, grid, gridSize);
-      placedWords.push({ word, cells });
-      return true;
+  let best = [];
+  let bestOverlap = -1;
+  for (const direction of DIRECTIONS) {
+    for (let startRow = 0; startRow < gridSize; startRow++) {
+      for (let startCol = 0; startCol < gridSize; startCol++) {
+        const cells = getWordCells(word, startRow, startCol, direction);
+        const overlap = overlapAt(word, cells, grid, gridSize);
+        if (overlap < 0 || overlap < bestOverlap) continue;
+        if (overlap > bestOverlap) {
+          bestOverlap = overlap;
+          best = [];
+        }
+        best.push(cells);
+      }
     }
   }
-  console.warn(`gridGenerator: could not place word: ${word}`);
-  return false;
+  if (best.length === 0) {
+    console.warn(`gridGenerator: could not place word: ${word}`);
+    return false;
+  }
+  const cells = best[randomInt(best.length)];
+  placeWordAt(word, cells, grid, gridSize);
+  placedWords.push({ word, cells });
+  return true;
 }
 
 function fillEmptyCells(grid, gridSize) {

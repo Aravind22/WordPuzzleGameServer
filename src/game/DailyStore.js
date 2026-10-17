@@ -24,12 +24,13 @@ function cellsEqual(a, b) {
   return a.length === b.length && a.every((cell, i) => cell.row === b[i].row && cell.col === b[i].col);
 }
 
-// One horizontal or vertical step at a time (the generator's directions).
+// One horizontal, vertical or diagonal step at a time (the generator's
+// directions).
 function isStraightLine(cells) {
   if (cells.length < 2) return false;
   const dr = cells[1].row - cells[0].row;
   const dc = cells[1].col - cells[0].col;
-  if (!((dr === 0 && Math.abs(dc) === 1) || (dc === 0 && Math.abs(dr) === 1))) return false;
+  if (Math.abs(dr) > 1 || Math.abs(dc) > 1 || (dr === 0 && dc === 0)) return false;
   return cells.every((c, i) => i === 0 || (c.row - cells[i - 1].row === dr && c.col - cells[i - 1].col === dc));
 }
 

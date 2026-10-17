@@ -2,6 +2,7 @@ const express = require('express');
 const { requireAuth, verifyIdToken, hasAdminCredentials, deleteFirebaseUser } = require('../auth/firebaseAuth');
 const { clientConfig, AD_SSV_WAIT_MS, monetizationOn } = require('../game/economy');
 const { utcDay, previousDay } = require('../game/utcDay');
+const { cleanBatch } = require('../game/playerStats');
 const DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/; // a UTC day, 'YYYY-MM-DD'
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -42,7 +43,9 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
     const loginGift = await economyStore.loginGift(player.playerId);
     const adsToday = await economyStore.adsToday(player.playerId);
     const store = await iapStore.status(player.playerId);
-    return { ...player, gems, hints, loginGift, adsToday, ...store, ...extra, serverNow: Date.now(), config: { ...clientConfig, monetization: monetizationOn() } };
+    // STATS tab; hasStats tells the client this server keeps them.
+    const stats = await playerStore.getStats(player.playerId);
+    return { ...player, gems, hints, loginGift, adsToday, ...store, stats, hasStats: true, ...extra, serverNow: Date.now(), config: { ...clientConfig, monetization: monetizationOn() } };
   }
 
   // Called by the client on every launch once signed in: creates the player
@@ -56,6 +59,17 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
     const player = await playerStore.setName(req.uid, req.body?.name);
     if (!player) return res.status(400).json({ error: 'invalid-name' });
     res.json(await profile(player, { isNew: false }));
+  });
+
+  // Lifetime STATS (playerStats.js) from the client's PlayerStatsStore:
+  //   { seedId?, seed?, events: [...] }  finished games (puzzle / daily /
+  //   match, each with an id), plus once per device the stats it had before
+  //   it started syncing. Retries are safe: an id is only ever applied once.
+  //   200 { stats } | 400 { error: 'invalid-stats' }
+  router.post('/me/stats', async (req, res) => {
+    const batch = cleanBatch(req.body);
+    if (!batch) return res.status(400).json({ error: 'invalid-stats' });
+    res.json({ stats: await playerStore.applyStats(req.uid, batch) });
   });
 
   // Account deletion (Play policy: the in-app button and the web request
@@ -212,13 +226,13 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
   // ------------------------------------------------------- Login Gift
 
   // First launch of each UTC day: the next step of the 7-day cycle.
-  //   200 { gems, hints, claimedToday, index, amount } | 409 { error: 'claimed', ... }
+  //   200 { gems, hints, claimedToday, index, amount, reward } | 409 { error: 'claimed', ... }
   router.post('/login-gift/claim', async (req, res) => {
     await economyStore.ensureWallet(req.uid);
     const result = await economyStore.claimLoginGift(req.uid);
     res.status(result.error ? 409 : 200).json({
       gems: result.gems, hints: result.hints, claimedToday: result.claimedToday, index: result.index,
-      amount: result.amount || 0, ...(result.error ? { error: result.error } : {}),
+      amount: result.amount || 0, reward: result.reward || '', ...(result.error ? { error: result.error } : {}),
     });
   });
 
@@ -274,11 +288,11 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
   });
 
   router.post('/puzzles', async (req, res) => {
-    const { gridSize, words, placements, sharedByTimeSeconds } = req.body || {};
+    const { gridSize, words, placements, sharedByTimeSeconds, sharedByName } = req.body || {};
     if (!gridSize || !Array.isArray(words) || !Array.isArray(placements)) {
       return res.status(400).json({ error: 'invalid-puzzle-data' });
     }
-    const record = await puzzleShareStore.create({ gridSize, words, placements, sharedByTimeSeconds });
+    const record = await puzzleShareStore.create({ gridSize, words, placements, sharedByTimeSeconds, sharedByName });
     res.json({ code: record.code });
   });
 
@@ -290,6 +304,7 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
       words: record.words,
       placements: record.placements,
       sharedByTimeSeconds: record.sharedByTimeSeconds,
+      sharedByName: record.sharedByName ?? null,
     });
   });
 

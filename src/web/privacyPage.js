@@ -3,7 +3,7 @@
 // game and this server actually collect: accounts (Firebase Auth), the
 // player record + gem ledger in MongoDB, multiplayer, shared puzzles, ads
 // (banner + rewarded with server-side verification) and UMP consent.
-const UPDATED = 'October 7, 2026';
+const UPDATED = 'October 17, 2026';
 const CONTACT_EMAIL = 'hello.runiclabs@gmail.com';
 
 function renderPrivacyPage() {
@@ -109,10 +109,11 @@ function renderPrivacyPage() {
 
 <h3>1.4 Shared puzzles</h3>
 <p>
-  If you share a puzzle, its word list and word placements (and, for solved
-  puzzles, your solve time) are stored on our server so the share code keeps working
-  for whoever you send it to. Shared puzzles are not linked to your player ID or
-  display name.
+  If you share a puzzle, its word list and word placements, your display name and
+  (for solved puzzles) your solve time are stored on our server so the share link
+  keeps working for whoever you send it to; anyone with the link can see that name
+  and time. Shared puzzles are not linked to your player ID. The share image is made
+  on your device and is not uploaded to our server.
 </p>
 
 <h3>1.5 Gems (virtual currency)</h3>

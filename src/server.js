@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const express = require('express');
 const http = require('http');
+const path = require('path');
 
 const { attachWsServer } = require('./net/wsAdapter');
 const RoomManager = require('./net/RoomManager');
@@ -10,15 +11,19 @@ const { createApiRouter } = require('./net/apiRoutes');
 const { createAdsRouter } = require('./net/adsRoutes');
 const { createIapRouter } = require('./net/iapRoutes');
 const { createProcessDefRouter } = require('./net/processDefRoutes');
+const { createFeedbackRouter } = require('./net/feedbackRoutes');
+const { mailerConfigured } = require('./feedback/mailer');
 const PuzzleShareStore = require('./game/PuzzleShareStore');
 const StatsStore = require('./game/StatsStore');
 const PlayerStore = require('./game/PlayerStore');
 const EconomyStore = require('./game/EconomyStore');
 const DailyStore = require('./game/DailyStore');
 const IapStore = require('./game/IapStore');
+const FeedbackStore = require('./game/FeedbackStore');
 const { initFirebase } = require('./auth/firebaseAuth');
 const { renderDeleteAccountPage } = require('./web/deleteAccountPage');
 const { renderPrivacyPage } = require('./web/privacyPage');
+const { renderSharePage, assetLinks } = require('./web/sharePage');
 const { connectDb } = require('./db');
 
 const PORT = process.env.PORT || 6969;
@@ -37,6 +42,9 @@ async function main() {
   dailyStore.scheduleFinalizer(); // closes each UTC day and pays the top 3
   const iapStore = new IapStore(db, { economyStore });
   await iapStore.init();
+  const feedbackStore = new FeedbackStore(db);
+  await feedbackStore.init();
+  if (!mailerConfigured()) console.warn('[feedback] SMTP_USER/SMTP_PASS not set: feedback is stored but not emailed');
   if (process.env.IAP_ALLOW_FAKE === 'true') console.warn('[iap] IAP_ALLOW_FAKE=true: fake purchase tokens accepted (local testing only!)');
 
   const app = express();
@@ -78,8 +86,27 @@ async function main() {
     res.set('Cache-Control', 'no-store').type('html').send(deleteAccountHtml);
   });
 
+  // Shared puzzle links (https://<host>/p/CODE): Android App Links verification,
+  // the landing page shown when the app doesn't open, and its preview image
+  // (the share card background, baked by the Unity client's
+  // "Word Search > Bake Share Card Background").
+  const publicOrigin = (process.env.PUBLIC_ORIGIN || 'https://gs04node.com').replace(/\/+$/, '');
+  app.get('/.well-known/assetlinks.json', (_req, res) => {
+    res.set('Cache-Control', 'public, max-age=3600').json(assetLinks());
+  });
+  app.get('/share-card.png', (_req, res) => {
+    res.set('Cache-Control', 'public, max-age=86400').sendFile(path.join(__dirname, 'web', 'assets', 'share-card.png'));
+  });
+  app.get('/p/:code', async (req, res) => {
+    const code = String(req.params.code).toUpperCase();
+    const record = PuzzleShareStore.isCode(code) ? await puzzleShareStore.get(code) : null;
+    res.status(record ? 200 : 404).set('Cache-Control', 'no-cache').type('html')
+      .send(renderSharePage({ origin: publicOrigin, code, record }));
+  });
+
   app.use('/api/ads', createAdsRouter({ economyStore }));
   app.use('/api/iap', createIapRouter({ iapStore }));
+  app.use('/api/feedback', createFeedbackRouter({ feedbackStore, playerStore }));
   app.use('/api', createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore, dailyStore, iapStore }));
 
   const roomManager = new RoomManager();

@@ -72,6 +72,9 @@ const DAILY_MIN_MS = 10 * 1000;
 // Login Gift: the first claim of each UTC day moves one step along this
 // 7-day cycle; a missed day starts it over.
 const LOGIN_GIFTS = [5, 10, 15, 20, 25, 30, 50];
+// With MONETIZATION=off (no gems) the same cycle gives hints instead; the
+// client keeps them in its own ad-hint stock (like the tutorial reward).
+const LOGIN_GIFT_HINTS = [1, 1, 2, 2, 3, 3, 5];
 
 // Daily Puzzle streak: consecutive UTC days with the Daily solved (a void
 // solve doesn't count, a missed day starts over). Bonus gems on reaching
@@ -97,6 +100,7 @@ const clientConfig = {
   arenaHints: ARENA_HINTS,
   dailyPrizes: DAILY_PRIZES,
   loginGifts: LOGIN_GIFTS,
+  loginGiftHints: LOGIN_GIFT_HINTS,
   streakBonuses: STREAK_BONUSES.map(([days, gems]) => ({ days, gems })),
   streakRepeat: STREAK_REPEAT,
   store: {
@@ -115,5 +119,5 @@ const clientConfig = {
 
 module.exports = {
   STARTER_GEMS, STARTER_HINTS, TUTORIAL_HINTS, CONTINUE_PRICES, REPLAY_PRICE, HINT_PACK, HINT_PACK_10, AD_HINTS_PER_DAY, AD_GEMS, AD_GEMS_PER_DAY, PRODUCTS, PASS_DAILY, AD_CONTINUES_PER_DAY, AD_SSV_WAIT_MS, ARENA_HINTS,
-  monetizationOn, DAILY_PRIZES, DAILY_MIN_MS, LOGIN_GIFTS, STREAK_BONUSES, STREAK_REPEAT, continuePrice, streakBonus, clientConfig,
+  monetizationOn, DAILY_PRIZES, DAILY_MIN_MS, LOGIN_GIFTS, LOGIN_GIFT_HINTS, STREAK_BONUSES, STREAK_REPEAT, continuePrice, streakBonus, clientConfig,
 };

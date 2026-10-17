@@ -1,7 +1,7 @@
 const crypto = require('crypto');
 const { arenaForTrophies } = require('./arena');
 const {
-  STARTER_GEMS, STARTER_HINTS, TUTORIAL_HINTS, REPLAY_PRICE, HINT_PACK, HINT_PACK_10, AD_HINTS_PER_DAY, AD_GEMS, AD_GEMS_PER_DAY, AD_CONTINUES_PER_DAY, ARENA_HINTS, LOGIN_GIFTS, continuePrice, monetizationOn,
+  STARTER_GEMS, STARTER_HINTS, TUTORIAL_HINTS, REPLAY_PRICE, HINT_PACK, HINT_PACK_10, AD_HINTS_PER_DAY, AD_GEMS, AD_GEMS_PER_DAY, AD_CONTINUES_PER_DAY, ARENA_HINTS, LOGIN_GIFTS, LOGIN_GIFT_HINTS, continuePrice, monetizationOn,
 } = require('./economy');
 const { utcDay, previousDay } = require('./utcDay');
 
@@ -230,9 +230,12 @@ class EconomyStore {
     return EconomyStore.loginGiftState(doc?.loginGift);
   }
 
-  // Claims today's step: { gems, hints, claimedToday, index, amount } or
-  // { error: 'claimed', ... } when today's is already taken. The day field
-  // is the lock: only one claim per UTC day can move it to today.
+  // Claims today's step: { gems, hints, claimedToday, index, amount, reward }
+  // or { error: 'claimed', ... } when today's is already taken. The day
+  // field is the lock: only one claim per UTC day can move it to today.
+  // reward is 'gems' (into the wallet) or, with monetization off, 'hints'
+  // (LOGIN_GIFT_HINTS: the client adds them to its ad-hint stock and the
+  // ledger entry only records the grant).
   async claimLoginGift(playerId) {
     const today = utcDay();
     const doc = await this.players.findOne({ _id: playerId }, { projection: { loginGift: 1 } });
@@ -245,9 +248,13 @@ class EconomyStore {
     );
     if (!moved.modifiedCount) return { error: 'claimed', ...(await this.loginGift(playerId)), ...(await this.wallet(playerId)) };
 
-    const amount = LOGIN_GIFTS[state.index];
-    const result = await this.apply(playerId, { item: 'login-gift', key: today, grant: { gems: amount }, context: { day: today, index: state.index } });
-    return { ...result, claimedToday: true, index: state.index, amount };
+    const reward = monetizationOn() ? 'gems' : 'hints';
+    const amount = (reward === 'gems' ? LOGIN_GIFTS : LOGIN_GIFT_HINTS)[state.index];
+    const result = await this.apply(playerId, {
+      item: 'login-gift', key: today, grant: reward === 'gems' ? { gems: amount } : {},
+      context: { day: today, index: state.index, reward, amount },
+    });
+    return { ...result, claimedToday: true, index: state.index, amount, reward };
   }
 
   // Daily Puzzle prize for a top-3 finish (once per day, see DailyStore).

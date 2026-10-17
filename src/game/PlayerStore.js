@@ -1,4 +1,5 @@
 const { arenaForTrophies } = require('./arena');
+const { cleanStats, applyEvent, mergeStats, KEEP_EVENT_IDS } = require('./playerStats');
 
 const COLLECTION = 'players';
 const WIN_GAIN = 30;
@@ -84,6 +85,8 @@ class PlayerStore {
     const guest = await this.collection.findOne({ _id: guestId });
     await this.getOrCreate(targetId);
     if (guest) {
+      // Unlike the profile, the guest's STATS are games that really happened: add them.
+      if (guest.stats) await this.updateStats(targetId, (stats) => (mergeStats(stats, cleanStats(guest.stats)), true));
       await this.collection.updateOne(
         { _id: targetId },
         { $push: { mergedFrom: { playerId: guestId, trophies: guest.trophies || 0, at: Date.now() } } }
@@ -115,7 +118,7 @@ class PlayerStore {
     const loserTrophies = Math.max(0, loserBefore.trophies - LOSS_DEDUCTION);
 
     await Promise.all([
-      this.collection.updateOne({ _id: winnerId }, { $set: { trophies: winnerTrophies } }),
+      this.collection.updateOne({ _id: winnerId }, { $set: { trophies: winnerTrophies }, $max: { 'stats.peakTrophies': winnerTrophies } }),
       this.collection.updateOne({ _id: loserId }, { $set: { trophies: loserTrophies } }),
     ]);
 
@@ -123,6 +126,58 @@ class PlayerStore {
       winner: { playerId: winnerId, trophies: winnerTrophies, arena: arenaForTrophies(winnerTrophies), delta: WIN_GAIN },
       loser: { playerId: loserId, trophies: loserTrophies, arena: arenaForTrophies(loserTrophies), delta: loserTrophies - loserBefore.trophies },
     };
+  }
+
+  // ---------------------------------------------------------------- stats
+  // Lifetime STATS (playerStats.js) live on the player doc as `stats`, with
+  // the ids of recently applied events and a version for concurrent writes
+  // (read, apply in JS, write back only if nobody wrote in between).
+
+  async getStats(playerId) {
+    const doc = await this.collection.findOne({ _id: playerId }, { projection: { stats: 1, trophies: 1 } });
+    const stats = cleanStats(doc?.stats);
+    stats.peakTrophies = Math.max(stats.peakTrophies, doc?.trophies || 0);
+    return stats;
+  }
+
+  // change(stats, seenIds) edits stats in place and returns the event ids it
+  // applied (true for a merge); nothing applied -> nothing written.
+  async updateStats(playerId, change) {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const doc = await this.collection.findOne({ _id: playerId }, { projection: { stats: 1, statsEventIds: 1, statsVersion: 1, trophies: 1 } });
+      if (!doc) return null;
+      const version = doc.statsVersion || 0;
+      const stats = cleanStats(doc.stats);
+      stats.peakTrophies = Math.max(stats.peakTrophies, doc.trophies || 0);
+      const applied = change(stats, new Set(doc.statsEventIds || []));
+      if (!applied || applied.length === 0) return stats;
+      const ids = Array.isArray(applied) ? [...(doc.statsEventIds || []), ...applied].slice(-KEEP_EVENT_IDS) : doc.statsEventIds || [];
+      const { matchedCount } = await this.collection.updateOne(
+        { _id: playerId, statsVersion: version === 0 ? { $in: [0, null] } : version },
+        { $set: { stats, statsEventIds: ids, statsVersion: version + 1 } }
+      );
+      if (matchedCount === 1) return stats;
+    }
+    throw new Error(`stats update for ${playerId} kept conflicting`);
+  }
+
+  // POST /me/stats: a device's seed (once) and its finished games, each
+  // applied at most once however often the client retries.
+  async applyStats(playerId, { seedId, seed, events }) {
+    await this.getOrCreate(playerId);
+    return this.updateStats(playerId, (stats, seen) => {
+      const applied = [];
+      if (seedId && !seen.has(seedId)) {
+        mergeStats(stats, seed);
+        applied.push(seedId);
+      }
+      for (const event of events) {
+        if (seen.has(event.id) || applied.includes(event.id)) continue;
+        applyEvent(stats, event);
+        applied.push(event.id);
+      }
+      return applied;
+    });
   }
 }
 

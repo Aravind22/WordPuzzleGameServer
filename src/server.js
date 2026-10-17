@@ -58,6 +58,14 @@ async function main() {
     res.set('Cache-Control', 'no-cache').type('html').send(privacyHtml);
   });
 
+  // app-ads.txt (IAB) at the domain root: AdMob reads it from the Play
+  // listing's developer website to verify our app's ad inventory. One line
+  // per authorised seller; add ad networks here if mediation is added.
+  const appAdsTxt = 'google.com, pub-1156545142489742, DIRECT, f08c47fec0942fa0\n';
+  app.get('/app-ads.txt', (_req, res) => {
+    res.set('Cache-Control', 'public, max-age=3600').type('text/plain').send(appAdsTxt);
+  });
+
   // Public account-deletion request page (Play Data safety "delete account"
   // URL). FIREBASE_API_KEY is the app's public web API key; SUPPORT_EMAIL is
   // shown for players who can't sign in with Google.

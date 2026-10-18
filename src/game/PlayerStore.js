@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const { arenaForTrophies } = require('./arena');
 const { cleanStats, applyEvent, mergeStats, KEEP_EVENT_IDS } = require('./playerStats');
 
@@ -19,12 +20,10 @@ class PlayerStore {
     return `PLAYER-${playerId.slice(-4).toUpperCase()}`;
   }
 
-  // Until a player picks one: spread over the set by id, so new players
-  // don't all share the same picture.
-  static defaultAvatar(playerId) {
-    let hash = 0;
-    for (const ch of String(playerId)) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-    return (hash % AVATAR_COUNT) + 1;
+  // A new player's picture until they pick one, so players don't all
+  // share the same one. Stored on the player doc (getOrCreate).
+  static randomAvatar() {
+    return crypto.randomInt(1, AVATAR_COUNT + 1);
   }
 
   // 1..AVATAR_COUNT, or null if invalid.
@@ -44,8 +43,15 @@ class PlayerStore {
 
   static toPlayer(doc) {
     const trophies = doc.trophies || 0;
-    const avatar = PlayerStore.cleanAvatar(doc.avatar) || PlayerStore.defaultAvatar(doc._id);
+    // 0 only for a doc getOrCreate hasn't seen since avatars arrived.
+    const avatar = PlayerStore.cleanAvatar(doc.avatar) || 0;
     return { playerId: doc._id, name: doc.name, avatar, trophies, arena: arenaForTrophies(trophies) };
+  }
+
+  // Read-only: { [playerId]: avatar } for the ids that have a player doc.
+  async avatarsOf(playerIds) {
+    const docs = await this.collection.find({ _id: { $in: playerIds } }, { projection: { avatar: 1 } }).toArray();
+    return Object.fromEntries(docs.map((d) => [d._id, PlayerStore.cleanAvatar(d.avatar) || 0]));
   }
 
   // Read-only: how many of playerIds sit in each arena, as { [arena]: count }.
@@ -61,19 +67,26 @@ class PlayerStore {
     return counts;
   }
 
-  // Returns { player, isNew }; creates the player on first sight and bumps
-  // lastSeenAt either way.
+  // Returns { player, isNew }; creates the player on first sight (with a
+  // random avatar) and bumps lastSeenAt either way. A player from before
+  // avatars gets a random one stored here too, once.
   async getOrCreate(playerId) {
     const now = Date.now();
     const result = await this.collection.findOneAndUpdate(
       { _id: playerId },
       {
-        $setOnInsert: { name: PlayerStore.defaultName(playerId), trophies: 0, createdAt: now },
+        $setOnInsert: { name: PlayerStore.defaultName(playerId), avatar: PlayerStore.randomAvatar(), trophies: 0, createdAt: now },
         $set: { lastSeenAt: now },
       },
       { upsert: true, returnDocument: 'after', includeResultMetadata: true }
     );
-    return { player: PlayerStore.toPlayer(result.value), isNew: !result.lastErrorObject?.updatedExisting };
+    let doc = result.value;
+    if (!PlayerStore.cleanAvatar(doc.avatar)) {
+      // Only if still unset, so a pick made meanwhile isn't overwritten.
+      await this.collection.updateOne({ _id: playerId, avatar: doc.avatar }, { $set: { avatar: PlayerStore.randomAvatar() } });
+      doc = await this.collection.findOne({ _id: playerId });
+    }
+    return { player: PlayerStore.toPlayer(doc), isNew: !result.lastErrorObject?.updatedExisting };
   }
 
   // Returns the updated player, or null if the name is invalid.
@@ -108,7 +121,7 @@ class PlayerStore {
   // account on this device, then signed into Play Games/Google which
   // already belongs to an older account. Folds the guest into the saved
   // account and deletes the guest's player record. The saved account's
-  // profile, trophies and gems win. Free gems (the starter grant -- all
+  // profile (name, avatar), trophies and gems win. Free gems (the starter grant -- all
   // there is until real-money purchases) never move over; purchased gems
   // will, once the Store exists.
   // Returns the saved account's player.

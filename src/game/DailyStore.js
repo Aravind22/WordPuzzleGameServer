@@ -8,7 +8,6 @@ const prizeList = () => (monetizationOn() ? ALL_PRIZES : []);
 const streakBonus = (count) => (monetizationOn() ? bonusFor(count) : 0);
 const PRIZE_SLOTS = ALL_PRIZES.length;
 const { DAY_MS, utcDay, dayStartMs, nextResetMs, previousDay } = require('./utcDay');
-const PlayerStore = require('./PlayerStore');
 
 const GRID_SIZE = 10;
 const WORDS_PER_PUZZLE = 8;
@@ -278,6 +277,9 @@ class DailyStore {
     const top = await this.attempts.find(solvedFilter).sort({ timeMs: 1, solvedAt: 1 }).limit(LEADERBOARD_SIZE).toArray();
     const mine = await this.attempts.findOne({ _id: `${day}:${playerId}`, ...ranked(day) });
     const result = await this.results.findOne({ _id: day });
+    // Rows from before avatars were saved with the attempt: their current one.
+    const missing = top.filter((a) => !a.avatar).map((a) => a.playerId);
+    const current = missing.length ? await this.playerStore.avatarsOf(missing) : {};
     return {
       day,
       final: !!result,
@@ -285,7 +287,7 @@ class DailyStore {
       serverNow: now,
       players: await this.attempts.countDocuments(solvedFilter),
       prizes: prizeList(),
-      rows: top.map((a, i) => ({ rank: i + 1, name: a.name || 'PLAYER', avatar: a.avatar || PlayerStore.defaultAvatar(a.playerId), timeMs: a.timeMs, prize: prizeList()[i] || 0, me: a.playerId === playerId })),
+      rows: top.map((a, i) => ({ rank: i + 1, name: a.name || 'PLAYER', avatar: a.avatar || current[a.playerId] || 0, timeMs: a.timeMs, prize: prizeList()[i] || 0, me: a.playerId === playerId })),
       me: mine ? { rank: await this.rankOf(mine), timeMs: mine.timeMs } : null,
     };
   }

@@ -63,6 +63,7 @@ class DailyStore {
     this.economyStore = economyStore;
     this.playerStore = playerStore;
     this.picker = new WordPicker(WORDS);
+    this._puzzles = new Map(); // day -> puzzle doc (never changes once created)
   }
 
   async init() {
@@ -74,8 +75,10 @@ class DailyStore {
   // short placement is regenerated. Concurrent first requests converge on
   // whichever insert wins.
   async puzzleFor(day) {
+    const cached = this._puzzles.get(day);
+    if (cached) return cached;
     const existing = await this.puzzles.findOne({ _id: day });
-    if (existing) return existing;
+    if (existing) return this.remember(existing);
     let generated;
     for (let tries = 0; tries < 20; tries++) {
       generated = gridGenerator.generate(this.picker.pick(WORDS_PER_PUZZLE), GRID_SIZE);
@@ -91,11 +94,18 @@ class DailyStore {
     };
     try {
       await this.puzzles.insertOne(doc);
-      return doc;
+      return this.remember(doc);
     } catch (err) {
       if (err.code !== 11000) throw err;
-      return this.puzzles.findOne({ _id: day });
+      return this.remember(await this.puzzles.findOne({ _id: day }));
     }
+  }
+
+  // Every swipe needs the day's puzzle, so the last couple stay in memory.
+  remember(puzzle) {
+    this._puzzles.set(puzzle._id, puzzle);
+    for (const day of [...this._puzzles.keys()].sort().slice(0, -2)) this._puzzles.delete(day);
+    return puzzle;
   }
 
   // What the client may see: letters and words, no placements.
@@ -211,10 +221,7 @@ class DailyStore {
   async submitWord(playerId, { day, cells }, now = Date.now()) {
     if (day !== utcDay(now)) return { error: 'wrong-day' };
     const id = `${day}:${playerId}`;
-    const attempt = await this.attempts.findOne({ _id: id });
-    if (!attempt) return { error: 'not-started' };
-    if (attempt.solvedAt) return { error: 'solved' };
-    const puzzle = await this.puzzles.findOne({ _id: day });
+    const puzzle = await this.puzzleFor(day);
     const size = puzzle.gridSize;
     if (!Array.isArray(cells) || cells.length > size
       || !cells.every((c) => Number.isInteger(c?.row) && Number.isInteger(c?.col) && c.row >= 0 && c.row < size && c.col >= 0 && c.col < size)
@@ -224,10 +231,20 @@ class DailyStore {
     const path = cells.map((c) => ({ row: c.row, col: c.col }));
     const reversed = [...path].reverse();
     const placement = puzzle.placements.find((pl) => cellsEqual(pl.cells, path) || cellsEqual(pl.cells, reversed));
-    if (!placement || attempt.found?.[placement.word]) return { word: null };
 
-    await this.attempts.updateOne({ _id: id, [`found.${placement.word}`]: { $exists: false } }, { $set: { [`found.${placement.word}`]: now } });
-    const updated = await this.attempts.findOne({ _id: id });
+    // A new word of an open attempt is stamped in one round trip; anything
+    // else (not a word, already found, not started, solved) reads the attempt.
+    const updated = placement && await this.attempts.findOneAndUpdate(
+      { _id: id, solvedAt: { $exists: false }, [`found.${placement.word}`]: { $exists: false } },
+      { $set: { [`found.${placement.word}`]: now } },
+      { returnDocument: 'after' }
+    );
+    if (!updated) {
+      const attempt = await this.attempts.findOne({ _id: id }, { projection: { solvedAt: 1 } });
+      if (!attempt) return { error: 'not-started' };
+      if (attempt.solvedAt) return { error: 'solved' };
+      return { word: null };
+    }
     const foundCount = Object.keys(updated.found || {}).length;
     const out = { word: placement.word, cells: placement.cells, foundCount, solved: false };
     if (foundCount < puzzle.words.length) return out;

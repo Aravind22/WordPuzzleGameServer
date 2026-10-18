@@ -1,4 +1,7 @@
 const Room = require('../game/Room');
+const BotDriver = require('../game/BotDriver');
+const PlayerStore = require('../game/PlayerStore');
+const { arenaForTrophies } = require('../game/arena');
 const debug = require('debug');
 
 const logSocket = debug('socket'); // room/session lifecycle: create, join, submit, leave, rejoin, disconnect
@@ -22,10 +25,12 @@ function emitMatchStart(io, room) {
 // stays casual with no trophy stakes. Ties get no trophy change either way.
 // The winner also gets the hint reward for a first-time arena (0 if none).
 async function applyRankedResult(room, winner, loserId, playerStore) {
+  if (room.mode === 'ranked' && winner) logBotResult(room, winner);
   if (room.mode !== 'ranked' || !winner || winner === 'tie' || !loserId) return [];
-  const result = await playerStore.applyMatchResult(winner, loserId);
+  const bot = room.botPlayer();
+  const result = bot ? await applyBotResult(room, bot, winner, loserId, playerStore) : await playerStore.applyMatchResult(winner, loserId);
   let hintsAwarded = 0;
-  if (economyStore) {
+  if (economyStore && winner !== bot?.playerId) {
     try {
       hintsAwarded = await economyStore.grantArenaHints(winner, result.winner.trophies - result.winner.delta, result.winner.trophies);
     } catch (err) {
@@ -36,6 +41,31 @@ async function applyRankedResult(room, winner, loserId, playerStore) {
     { playerId: result.winner.playerId, trophies: result.winner.trophies, delta: result.winner.delta, hintsAwarded },
     { playerId: result.loser.playerId, trophies: result.loser.trophies, delta: result.loser.delta },
   ];
+}
+
+// Against a bot only the human's trophies are persisted; the bot's side is
+// computed the same way so the gameOver payload looks like any other.
+async function applyBotResult(room, bot, winner, loserId, playerStore) {
+  const humanId = winner === bot.playerId ? loserId : winner;
+  const human = await playerStore.applySoloResult(humanId, winner === humanId);
+  const botBefore = bot.trophies;
+  bot.trophies = winner === bot.playerId ? botBefore + PlayerStore.WIN_GAIN : Math.max(0, botBefore - PlayerStore.LOSS_DEDUCTION);
+  const botSide = { playerId: bot.playerId, trophies: bot.trophies, arena: arenaForTrophies(bot.trophies), delta: bot.trophies - botBefore };
+  return winner === humanId ? { winner: human, loser: botSide } : { winner: botSide, loser: human };
+}
+
+// One line per finished bot match, for tuning botConfig (server log only).
+function logBotResult(room, winner) {
+  const bot = room.botPlayer();
+  if (!bot) return;
+  const human = room.otherPlayer(bot.playerId);
+  const secs = (Date.now() - room.startedAt) / 1000;
+  const humanWords = human.foundWords.length;
+  const result = winner === 'tie' ? 'tie' : winner === human.playerId ? 'human' : 'bot';
+  console.log(
+    `[bot] match room=${room.id} arena=${arenaForTrophies(human.trophies)} winner=${result} ` +
+      `score=${humanWords}-${bot.foundWords.length} secs=${secs.toFixed(0)} humanSecPerWord=${humanWords ? (secs / humanWords).toFixed(1) : '-'}`
+  );
 }
 
 // Tells the other player that playerId's open rematch offer is gone (they
@@ -150,11 +180,17 @@ async function handleSubmitWord(socket, roomManager, io, cells, playerStore) {
     return socket.emit('wordRejected', { reason: 'invalid' });
   }
   logSocket('submitWord %s found "%s" in room %s', playerId, entry.word, room.id);
+  await applyFound(io, roomManager, room, entry, playerId, playerStore);
+}
 
+// A validated find, by a human (submitWord) or the room's bot: broadcasts
+// it and, if that ended the match, applies the result and closes the room.
+async function applyFound(io, roomManager, room, entry, playerId, playerStore) {
   const { scores, gameOver, winner } = room.recordFound(entry, playerId);
   io.to(room.id).emit('wordFound', { word: entry.word, cells: entry.cells, playerId, scores });
 
   if (gameOver) {
+    room.botDriver?.stop();
     const loserId = winner !== 'tie' ? room.otherPlayer(winner)?.playerId : null;
     const trophyChanges = await applyRankedResult(room, winner, loserId, playerStore);
     io.to(room.id).emit('gameOver', { winner, scores, trophyChanges });
@@ -247,9 +283,26 @@ function handleDisconnect(socket, roomManager, io, playerStore) {
 // synchronous handleFindMatch's second half, now decoupled from the request
 // that triggered queuing since pairing can happen well after either
 // player's findMatch call returns.
-function handleRoomReady(io, room) {
+function handleRoomReady(io, roomManager, playerStore, room) {
   logMm('room %s ready: %o', room.id, room.players.map((p) => p.playerId));
+  const bot = room.botPlayer();
+  if (bot) {
+    // Nobody to play against: drop the room without a result rather than
+    // let the bot "win" against an empty seat.
+    const human = room.otherPlayer(bot.playerId);
+    if (!io.sockets.sockets.get(human.socketId)) {
+      console.warn(`[mm] bot room ${room.id}: no live socket for ${human.playerId}, dropping it`);
+      roomManager.closeRoom(room.id);
+      return;
+    }
+    room.botDriver = new BotDriver(room, bot, (entry) => {
+      logSocket('bot %s found "%s" in room %s', bot.playerId, entry.word, room.id);
+      applyFound(io, roomManager, room, entry, bot.playerId, playerStore).catch((err) => console.error(`[bot] room ${room.id} applyFound failed:`, err));
+    });
+  }
+
   for (const p of room.players) {
+    if (p.isBot) continue;
     const sock = io.sockets.sockets.get(p.socketId);
     if (!sock) {
       console.warn(`[mm] room ${room.id}: no live socket for ${p.playerId} (${p.socketId}), likely disconnected before pairing`);
@@ -263,6 +316,7 @@ function handleRoomReady(io, room) {
   io.to(b.socketId).emit('opponentJoined', { opponentName: a.name, opponentAvatar: a.avatar || 0 });
 
   emitMatchStart(io, room);
+  room.botDriver?.start();
 }
 
 // Set by registerSocketHandlers; used for the arena hint reward.
@@ -270,7 +324,7 @@ let economyStore = null;
 
 function registerSocketHandlers(io, roomManager, playerStore, economy = null) {
   economyStore = economy;
-  roomManager.onRoomReady((room) => handleRoomReady(io, room));
+  roomManager.onRoomReady((room) => handleRoomReady(io, roomManager, playerStore, room));
 
   io.on('connection', (socket) => {
     logSocket('connection %s playerId=%s', socket.shortId, socket.data.playerId);

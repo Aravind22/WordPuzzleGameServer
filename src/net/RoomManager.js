@@ -1,5 +1,6 @@
 const { customAlphabet } = require('nanoid');
 const Room = require('../game/Room');
+const { makeBot } = require('../game/botIdentity');
 const debug = require('debug');
 
 const logMm = debug('mm');
@@ -12,6 +13,10 @@ const CLEANUP_INTERVAL_MS = 60 * 1000;
 const MATCHMAKER_TICK_MS = 1000;
 const EXPAND_SEARCH_AFTER_MS = 5000;
 const REMATCH_WINDOW_MS = 60 * 1000;
+// Ranked bots (BOTS=off disables): a player still unpaired BOT_AFTER_MS
+// after queuing, with no other human queued in any arena, gets a bot.
+const BOTS_ENABLED = process.env.BOTS !== 'off';
+const BOT_AFTER_MS = Number(process.env.BOT_AFTER_MS) || 5000;
 
 class RoomManager {
   constructor() {
@@ -85,14 +90,13 @@ class RoomManager {
     if (had) logMm('queue -= %s', playerId);
   }
 
-  // Same-arena pass first (skill-relevant pairing when possible), then an
-  // expand-search pass: anyone who has waited >= EXPAND_SEARCH_AFTER_MS gets
-  // paired with the next available entry regardless of arena -- only *that*
-  // entry needs to have waited the 5s, not both sides of the pair.
-  // TODO(future): if an entry is still unmatched after some further grace
-  // period, pair it with a bot instead of a human opponent.
+  // 1. Same-arena pass (skill-relevant pairing when possible).
+  // 2. Expand-search pass: anyone who has waited >= EXPAND_SEARCH_AFTER_MS is
+  //    paired with another queued human in the nearest arena (longest wait
+  //    breaks ties) -- only *that* entry needs to have waited, not both.
+  // 3. Bot pass: anyone still alone after BOT_AFTER_MS gets a bot.
   matchmakerTick() {
-    if (this.queue.length < 2) return;
+    if (this.queue.length === 0) return;
     logMm('tick: [%s]', this.queue.map((q) => `${q.playerId}/${q.arena}`).join(', '));
 
     const matchedPlayerIds = new Set();
@@ -118,20 +122,37 @@ class RoomManager {
     }
 
     const now = Date.now();
-    let remaining = this.queue.slice().sort((a, b) => a.queuedAt - b.queuedAt);
-    const expandedMatched = new Set();
+    const remaining = this.queue.slice().sort((a, b) => a.queuedAt - b.queuedAt);
     while (remaining.length >= 2) {
-      const oldest = remaining[0];
-      if (now - oldest.queuedAt < EXPAND_SEARCH_AFTER_MS) break;
-      const [a, b] = remaining.splice(0, 2);
-      expandedMatched.add(a.playerId);
-      expandedMatched.add(b.playerId);
+      const a = remaining[0];
+      if (now - a.queuedAt < EXPAND_SEARCH_AFTER_MS) break;
+      // Nearest arena wins; remaining is oldest-first, so the first entry
+      // at the smallest gap is also the longest-waiting one at that gap.
+      let best = 1;
+      for (let i = 2; i < remaining.length; i++) {
+        if (Math.abs(remaining[i].arena - a.arena) < Math.abs(remaining[best].arena - a.arena)) best = i;
+      }
+      const b = remaining.splice(best, 1)[0];
+      remaining.shift();
       this._pairAndStart(a, b);
     }
 
-    if (expandedMatched.size > 0) {
-      this.queue = this.queue.filter((q) => !expandedMatched.has(q.playerId));
+    // At most one entry is left now: if it has waited long enough, a bot.
+    if (BOTS_ENABLED && remaining.length === 1 && now - remaining[0].queuedAt >= BOT_AFTER_MS) {
+      this._startBotMatch(remaining.shift());
     }
+
+    const stillQueued = new Set(remaining.map((q) => q.playerId));
+    this.queue = this.queue.filter((q) => stillQueued.has(q.playerId));
+  }
+
+  _startBotMatch(entry) {
+    const room = this.createRoom(entry, 'ranked');
+    const bot = makeBot(entry);
+    room.addPlayer(bot);
+    room.start();
+    logMm('bot match %s (arena=%s) vs bot %s -> room %s', entry.playerId, entry.arena, bot.playerId, room.id);
+    this._onRoomReady?.(room);
   }
 
   _pairAndStart(a, b) {

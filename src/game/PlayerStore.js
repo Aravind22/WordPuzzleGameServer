@@ -179,6 +179,16 @@ class PlayerStore {
     };
   }
 
+  // A ranked result against a bot: same WIN_GAIN / LOSS_DEDUCTION, but only
+  // the human's side exists to persist. Returns { playerId, trophies, arena, delta }.
+  async applySoloResult(playerId, won) {
+    const { player: before } = await this.getOrCreate(playerId);
+    const trophies = won ? before.trophies + WIN_GAIN : Math.max(0, before.trophies - LOSS_DEDUCTION);
+    const update = won ? { $set: { trophies }, $max: { 'stats.peakTrophies': trophies } } : { $set: { trophies } };
+    await this.collection.updateOne({ _id: playerId }, update);
+    return { playerId, trophies, arena: arenaForTrophies(trophies), delta: trophies - before.trophies };
+  }
+
   // ---------------------------------------------------------------- stats
   // Lifetime STATS (playerStats.js) live on the player doc as `stats`, with
   // the ids of recently applied events and a version for concurrent writes
@@ -233,5 +243,7 @@ class PlayerStore {
 }
 
 PlayerStore.NAME_MAX_LENGTH = NAME_MAX_LENGTH;
+PlayerStore.WIN_GAIN = WIN_GAIN;
+PlayerStore.LOSS_DEDUCTION = LOSS_DEDUCTION;
 
 module.exports = PlayerStore;

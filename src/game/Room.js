@@ -51,6 +51,7 @@ class Room {
     this.createdAt = Date.now();
     this.lastActivityAt = Date.now();
     this.disconnectTimers = new Map(); // playerId -> Timeout
+    this.botDriver = null; // BotDriver when the opponent is a ranked bot
   }
 
   touch() {
@@ -62,7 +63,7 @@ class Room {
       return now - this.lastActivityAt > ABANDONED_WAITING_MS;
     }
     if (this.status === 'playing') {
-      return this.players.every((p) => !p.connected);
+      return this.players.every((p) => p.isBot || !p.connected);
     }
     return this.status === 'finished';
   }
@@ -77,8 +78,10 @@ class Room {
 
   // trophies is only known for ranked (Quick Match) players; private rooms
   // don't show it, so it stays 0 there.
-  addPlayer({ playerId, socketId, name, avatar = 0, trophies = 0 }) {
+  // isBot marks a server-side ranked bot (never sent to the client).
+  addPlayer({ playerId, socketId, name, avatar = 0, trophies = 0, isBot = false }) {
     const player = { playerId, socketId, name, avatar, trophies, foundWords: [], connected: true };
+    if (isBot) player.isBot = true;
     this.players.push(player);
     this.touch();
     return player;
@@ -92,6 +95,10 @@ class Room {
     return this.players.find((p) => p.playerId !== playerId);
   }
 
+  botPlayer() {
+    return this.players.find((p) => p.isBot);
+  }
+
   start() {
     const words = sharedWordPicker.pick(WORDS_PER_PUZZLE);
     const { grid, gridSize, placedWords } = gridGenerator.generate(words, GRID_SIZE);
@@ -99,6 +106,7 @@ class Room {
     this.gridSize = gridSize;
     this.placedWords = placedWords;
     this.status = 'playing';
+    this.startedAt = Date.now();
     this.touch();
   }
 
@@ -136,7 +144,9 @@ class Room {
     this.foundOrder.push({ word: entry.word, playerId });
     const player = this.getPlayer(playerId);
     player.foundWords.push(entry.word);
+    player.lastFoundAt = Date.now(); // paces a ranked bot (BotDriver)
     this.touch();
+    if (!player.isBot) this.botDriver?.onHumanFound();
 
     return this.checkWinCondition();
   }
@@ -167,6 +177,7 @@ class Room {
   markDisconnected(playerId) {
     const player = this.getPlayer(playerId);
     if (player) player.connected = false;
+    this.botDriver?.pause(); // a bot doesn't race an empty board
     this.touch();
   }
 
@@ -178,6 +189,7 @@ class Room {
     }
     this.touch();
     this.clearDisconnectTimer(playerId);
+    this.botDriver?.resume();
   }
 
   clearDisconnectTimer(playerId) {
@@ -203,6 +215,7 @@ class Room {
   clearAllTimers() {
     for (const timer of this.disconnectTimers.values()) clearTimeout(timer);
     this.disconnectTimers.clear();
+    this.botDriver?.stop();
   }
 }
 

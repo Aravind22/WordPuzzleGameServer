@@ -292,6 +292,16 @@ class DailyStore {
     };
   }
 
+  // Account deletion: the player's attempts (name, avatar, times) and their
+  // entries in finalized winner lists. Other players' stored ranks stay.
+  async deletePlayer(playerIds) {
+    await this.attempts.deleteMany({ playerId: { $in: playerIds } });
+    await this.results.updateMany(
+      { 'winners.playerId': { $in: playerIds } },
+      { $pull: { winners: { playerId: { $in: playerIds } } } }
+    );
+  }
+
   async markPrizeSeen(playerId, day) {
     await this.attempts.updateOne({ _id: `${day}:${playerId}` }, { $set: { prizeSeen: true } });
   }

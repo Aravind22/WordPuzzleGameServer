@@ -32,7 +32,7 @@ async function retryInProgress(claim) {
   return result;
 }
 
-function createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore, dailyStore, iapStore }) {
+function createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore, dailyStore, iapStore, feedbackStore }) {
   const router = express.Router();
   router.use(express.json());
   router.use(requireAuth);
@@ -77,12 +77,19 @@ function createApiRouter({ puzzleShareStore, statsStore, playerStore, economySto
   // Account deletion (Play policy: the in-app button and the web request
   // page both call this). Server data first, then the Firebase user; a
   // failure on the second step returns 500 so the caller can retry (both
-  // steps are idempotent).
+  // steps are idempotent). Every Mongo row of the player and its merged
+  // guests is deleted (Daily attempts and winner entries, feedback, the
+  // economy ledger); purchase records stay for tax/fraud, unlinked. The
+  // player record goes last: it lists the merged guests, so a retry after a
+  // partial failure still finds their rows.
   router.delete('/me', async (req, res) => {
     if (!hasAdminCredentials()) return res.status(503).json({ error: 'deletion-unavailable' });
+    const ids = await playerStore.accountIds(req.uid);
+    await dailyStore.deletePlayer(ids);
+    await feedbackStore.deletePlayer(ids);
+    await economyStore.deletePlayer(ids);
+    await iapStore.anonymize(ids);
     const hadPlayer = await playerStore.deletePlayer(req.uid);
-    await economyStore.anonymize(req.uid);
-    await iapStore.anonymize(req.uid);
     try {
       await deleteFirebaseUser(req.uid);
     } catch (err) {

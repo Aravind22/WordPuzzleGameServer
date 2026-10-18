@@ -51,7 +51,10 @@ function renderDeleteAccountPage({ apiKey, projectId, supportEmail }) {
   <div class="card">
     <h2>What gets deleted</h2>
     <ul>
-      <li>Your player profile: display name, trophies and arena</li>
+      <li>Your player profile: display name, avatar, trophies, arena, gems, hints and stats</li>
+      <li>Your Daily Puzzle attempts and leaderboard entries</li>
+      <li>Feedback you sent from the game</li>
+      <li>Your gem, hint and rewarded-ad transaction history</li>
       <li>Your account and every sign-in linked to it (Google, Google Play Games)</li>
     </ul>
     <p class="muted">Deletion is immediate and can't be undone. Puzzles you shared with a code aren't linked to you and stay available to whoever has the code. Puzzle history stored on your phone is removed when you delete from inside the app, or when you uninstall it.</p>

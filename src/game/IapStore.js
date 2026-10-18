@@ -197,9 +197,9 @@ class IapStore {
   }
 
   // Account deletion: purchase records stay (tax/fraud), unlinked from the player.
-  async anonymize(playerId) {
+  async anonymize(playerIds) {
     const alias = `deleted-${crypto.randomBytes(8).toString('hex')}`;
-    await this.purchases.updateMany({ playerId }, { $set: { playerId: alias } });
+    await this.purchases.updateMany({ playerId: { $in: playerIds } }, { $set: { playerId: alias } });
   }
 
   // ------------------------------------------------------------------

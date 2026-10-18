@@ -22,6 +22,11 @@ class FeedbackStore {
     return { ...record, _id: insertedId };
   }
 
+  // Account deletion: everything the player (and merged guests) sent.
+  async deletePlayer(playerIds) {
+    await this.collection.deleteMany({ playerId: { $in: playerIds } });
+  }
+
   async markEmailed(id) {
     await this.collection.updateOne({ _id: id }, { $set: { emailed: true } });
   }

@@ -1,4 +1,3 @@
-const crypto = require('crypto');
 const { arenaForTrophies } = require('./arena');
 const {
   STARTER_GEMS, STARTER_HINTS, TUTORIAL_HINTS, REPLAY_PRICE, HINT_PACK, HINT_PACK_10, AD_HINTS_PER_DAY, AD_GEMS, AD_GEMS_PER_DAY, AD_CONTINUES_PER_DAY, ARENA_HINTS, LOGIN_GIFTS, LOGIN_GIFT_HINTS, continuePrice, monetizationOn,
@@ -339,11 +338,9 @@ class EconomyStore {
     }
   }
 
-  // Account deletion: the ledger is kept for fraud/tax records, but no
-  // longer points at the player.
-  async anonymize(playerId) {
-    const alias = `deleted-${crypto.randomBytes(8).toString('hex')}`;
-    await this.ledger.updateMany({ playerId }, { $set: { playerId: alias } });
+  // Account deletion: every ledger row of the player (and merged guests).
+  async deletePlayer(playerIds) {
+    await this.ledger.deleteMany({ playerId: { $in: playerIds } });
   }
 
   async _starter(playerId, field, amount, key, reason) {

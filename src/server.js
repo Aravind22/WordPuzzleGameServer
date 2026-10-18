@@ -107,7 +107,7 @@ async function main() {
   app.use('/api/ads', createAdsRouter({ economyStore }));
   app.use('/api/iap', createIapRouter({ iapStore }));
   app.use('/api/feedback', createFeedbackRouter({ feedbackStore, playerStore }));
-  app.use('/api', createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore, dailyStore, iapStore }));
+  app.use('/api', createApiRouter({ puzzleShareStore, statsStore, playerStore, economyStore, dailyStore, iapStore, feedbackStore }));
 
   const roomManager = new RoomManager();
   registerSocketHandlers(io, roomManager, playerStore, economyStore);

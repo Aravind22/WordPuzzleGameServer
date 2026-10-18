@@ -197,7 +197,10 @@ function renderPrivacyPage() {
   <tr><th>Data</th><th>Where it lives</th><th>Retention</th></tr>
   <tr><td>Player record (player ID, display name, trophies, gems, dates)</td><td>Game server database</td><td>Until you delete your account (Section 7)</td></tr>
   <tr><td>Sign-in accounts (guest, Play Games, Google name/email)</td><td>Firebase Authentication (Google)</td><td>Until you delete your account</td></tr>
-  <tr><td>Gem and rewarded-ad transaction log</td><td>Game server database</td><td>Kept for fraud prevention and accounting. When you delete your account, its entries are anonymised: no longer linked to your player ID.</td></tr>
+  <tr><td>Gem and rewarded-ad transaction log</td><td>Game server database</td><td>Until you delete your account</td></tr>
+  <tr><td>Daily Puzzle attempts and leaderboard entries (display name, avatar, times)</td><td>Game server database</td><td>Until you delete your account</td></tr>
+  <tr><td>Feedback you send (message, rating, device model, app version)</td><td>Game server database and the developer's email</td><td>In the database until you delete your account</td></tr>
+  <tr><td>In-app purchase records (product, order ID, date)</td><td>Game server database</td><td>Kept for tax and fraud prevention. When you delete your account they are anonymised: no longer linked to your player ID.</td></tr>
   <tr><td>Live match data</td><td>Game server memory only</td><td>Cleared when the match ends, a player stays disconnected past the grace period (~20 seconds), or a waiting room is abandoned</td></tr>
   <tr><td>Shared puzzle content</td><td>Game server database</td><td>Kept so share codes keep working; contains no personal information</td></tr>
   <tr><td>"Total solved" counter</td><td>Game server database</td><td>A single global number, not tied to anyone</td></tr>

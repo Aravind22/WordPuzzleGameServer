@@ -141,9 +141,16 @@ class PlayerStore {
     return { player: PlayerStore.toPlayer(target), merged: !!guest };
   }
 
-  // Account deletion (in-app or the web request page): removes everything
-  // the server stores about the player. Shared puzzles carry no owner, so
-  // there is nothing else to remove. Idempotent.
+  // Account deletion: the player id plus every guest merged into it, since
+  // the guests' Daily attempts, feedback and ledger rows keep their own ids.
+  async accountIds(playerId) {
+    const doc = await this.collection.findOne({ _id: playerId }, { projection: { mergedFrom: 1 } });
+    return [playerId, ...(doc?.mergedFrom || []).map((m) => m.playerId).filter(Boolean)];
+  }
+
+  // Account deletion (in-app or the web request page): the player record,
+  // removed last (see DELETE /me) since it lists the merged guests.
+  // Idempotent.
   async deletePlayer(playerId) {
     const { deletedCount } = await this.collection.deleteOne({ _id: playerId });
     return deletedCount > 0;
